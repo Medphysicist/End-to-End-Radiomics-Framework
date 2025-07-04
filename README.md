@@ -25,7 +25,7 @@ This Streamlit application provides a complete, web-based pipeline for radiomics
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/YOUR_USERNAME/radiomics_pipeline.git
+    git clone https://github.com/Medphysicist/radiomics_pipeline.git
     cd radiomics_pipeline
     ```
 
