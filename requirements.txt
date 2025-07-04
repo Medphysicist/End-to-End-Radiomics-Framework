@@ -1,0 +1,19 @@
+# Core application and data handling
+streamlit
+pandas
+numpy
+
+# Medical imaging and radiomics
+pydicom
+rt-utils
+SimpleITK
+pyradiomics
+
+# Analysis and visualization
+scikit-learn
+seaborn
+matplotlib
+
+# System utilities and configuration
+psutil
+pyyaml
