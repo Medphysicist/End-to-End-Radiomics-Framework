@@ -1,8 +1,9 @@
+# requirements.txt
+
 streamlit
 pandas
 numpy
 pydicom
 rt-utils
 SimpleITK
-pyradiomics==3.0.1
-matplotlib
+git+https://github.com/AIM-Harvard/pyradiomics.git@v3.1.0
