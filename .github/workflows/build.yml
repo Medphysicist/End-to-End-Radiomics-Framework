@@ -35,7 +35,22 @@ jobs:
     - name: Install project dependencies
       run: |
         pip install -r requirements.txt
-    
+
+    # --- NEW STEP ADDED HERE ---
+    - name: Create Streamlit config for packaging
+      run: |
+        mkdir .streamlit
+        echo '\
+        [server]\n\
+        headless = true\n\
+        port = 8501\n\
+        enableCORS = false\n\
+        \n\
+        [theme]\n\
+        base = "dark"\n\
+        ' > .streamlit/config.toml
+      # Note: The above shell command works for Linux, macOS, and the default shell on Windows runners.
+
     - name: Build executable (Linux)
       if: matrix.os == 'ubuntu-latest'
       run: |
