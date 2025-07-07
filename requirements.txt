@@ -1,7 +1,7 @@
 # Core application and data handling
 streamlit
 pandas
-numpy>=1.21.0
+numpy
 
 # Medical imaging and radiomics
 pydicom
