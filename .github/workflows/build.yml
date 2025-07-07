@@ -26,45 +26,30 @@ jobs:
       with:
         python-version: '3.9'
     
-    - name: Install dependencies
+    - name: Install build dependencies
       run: |
         python -m pip install --upgrade pip
+        pip install numpy
         pip install nuitka
-        pip install -c constraints.txt -r requirements.txt
+        
+    - name: Install project dependencies
+      run: |
+        pip install -r requirements.txt
     
     - name: Build executable (Linux)
       if: matrix.os == 'ubuntu-latest'
       run: |
-        nuitka --onefile --output-filename=radiomics-pipeline-linux \
-               --include-data-dir=.streamlit=.streamlit \
-               --include-data-files=*.py \
-               --include-data-files=*.md \
-               --follow-imports \
-               --enable-plugin=anti-bloat \
-               app.py
+        nuitka --onefile --output-filename=radiomics-pipeline-linux --include-data-dir=.streamlit=.streamlit --include-data-files=*.py --include-data-files=*.md --follow-imports --enable-plugin=anti-bloat app.py
     
     - name: Build executable (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        nuitka --onefile --output-filename=radiomics-pipeline-windows.exe \
-               --include-data-dir=.streamlit=.streamlit \
-               --include-data-files=*.py \
-               --include-data-files=*.md \
-               --follow-imports \
-               --enable-plugin=anti-bloat \
-               --windows-console-mode=attach \
-               app.py
+        nuitka --onefile --output-filename=radiomics-pipeline-windows.exe --include-data-dir=.streamlit=.streamlit --include-data-files=*.py --include-data-files=*.md --follow-imports --enable-plugin=anti-bloat --windows-console-mode=attach app.py
     
     - name: Build executable (macOS)
       if: matrix.os == 'macos-latest'
       run: |
-        nuitka --onefile --output-filename=radiomics-pipeline-macos \
-               --include-data-dir=.streamlit=.streamlit \
-               --include-data-files=*.py \
-               --include-data-files=*.md \
-               --follow-imports \
-               --enable-plugin=anti-bloat \
-               app.py
+        nuitka --onefile --output-filename=radiomics-pipeline-macos --include-data-dir=.streamlit=.streamlit --include-data-files=*.py --include-data-files=*.md --follow-imports --enable-plugin=anti-bloat app.py
     
     - name: Upload artifacts (Linux)
       if: matrix.os == 'ubuntu-latest'
