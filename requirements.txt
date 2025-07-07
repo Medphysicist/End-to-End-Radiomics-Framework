@@ -6,4 +6,5 @@ numpy
 pydicom
 rt-utils
 SimpleITK
+yaml
 git+https://github.com/AIM-Harvard/pyradiomics.git@v3.1.0
