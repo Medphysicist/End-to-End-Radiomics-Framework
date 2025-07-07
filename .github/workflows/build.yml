@@ -34,19 +34,18 @@ jobs:
         
     - name: Install project dependencies
       run: pip install -r requirements.txt
-      # No shell needed here, it's a simple command
 
     - name: Create Streamlit config for packaging
-      shell: bash  # Force bash for this multi-line script
+      shell: bash
       run: |
         mkdir .streamlit
         echo -e "[server]\nheadless = true\nport = 8501\nenableCORS = false" > .streamlit/config.toml
 
     - name: Build executable (Linux)
       if: matrix.os == 'ubuntu-latest'
-      shell: bash # This is default, but explicit is fine
+      shell: bash
       run: |
-        nuitka --onefile --output-filename=radiomics-pipeline-linux \
+        python -m nuitka --onefile --output-filename=radiomics-pipeline-linux \
           --include-data-dir=.streamlit=.streamlit \
           --include-data-files=*.py=./ \
           --include-data-files=*.md=./ \
@@ -57,9 +56,9 @@ jobs:
     
     - name: Build executable (Windows)
       if: matrix.os == 'windows-latest'
-      shell: bash  # <-- THE CRITICAL CHANGE FOR WINDOWS
+      shell: bash 
       run: |
-        nuitka --onefile --output-filename=radiomics-pipeline-windows.exe \
+        python -m nuitka --onefile --output-filename=radiomics-pipeline-windows.exe \
           --include-data-dir=.streamlit=.streamlit \
           --include-data-files=*.py=./ \
           --include-data-files=*.md=./ \
@@ -71,9 +70,9 @@ jobs:
     
     - name: Build executable (macOS)
       if: matrix.os == 'macos-latest'
-      shell: bash # This is default, but explicit is fine
+      shell: bash
       run: |
-        nuitka --onefile --output-filename=radiomics-pipeline-macos \
+        python -m nuitka --onefile --output-filename=radiomics-pipeline-macos \
           --include-data-dir=.streamlit=.streamlit \
           --include-data-files=*.py=./ \
           --include-data-files=*.md=./ \
@@ -82,8 +81,6 @@ jobs:
           --enable-plugin=tk-inter \
           app.py
     
-    # ... (rest of the file is unchanged) ...
-# ... (rest of the file is the same) ...
     - name: Upload artifacts (Linux)
       if: matrix.os == 'ubuntu-latest'
       uses: actions/upload-artifact@v4
