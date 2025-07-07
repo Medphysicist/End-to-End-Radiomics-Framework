@@ -4,5 +4,5 @@ numpy
 pydicom
 rt-utils
 SimpleITK
-pyradiomics
+pyradiomics==3.0.1
 matplotlib
