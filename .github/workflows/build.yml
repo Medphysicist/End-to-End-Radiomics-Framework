@@ -34,11 +34,99 @@ jobs:
       run: |
         pip install -r requirements.txt
     
+    - name: Create metadata workaround
+      run: |
+        python -c "
+import os
+import sys
+import json
+import importlib.metadata
+
+# Create a fake metadata file for streamlit
+try:
+    streamlit_version = importlib.metadata.version('streamlit')
+    metadata = {
+        'name': 'streamlit',
+        'version': streamlit_version,
+        'summary': 'The fastest way to build data apps',
+        'home-page': 'https://streamlit.io',
+        'author': 'Streamlit Inc',
+        'license': 'Apache 2.0'
+    }
+    
+    # Write metadata to a file that can be bundled
+    with open('streamlit_metadata.json', 'w') as f:
+        json.dump(metadata, f)
+        
+    print(f'Created metadata file for streamlit version {streamlit_version}')
+except Exception as e:
+    print(f'Error creating metadata: {e}')
+"
+    
+    - name: Create wrapper script
+      run: |
+        python -c "
+import os
+
+wrapper_content = '''
+import sys
+import os
+import json
+import importlib.metadata
+
+# Monkey patch importlib.metadata to handle streamlit
+original_version = importlib.metadata.version
+original_distribution = importlib.metadata.distribution
+
+def patched_version(package_name):
+    if package_name == 'streamlit':
+        try:
+            # Try to load from bundled metadata
+            if hasattr(sys, '_MEIPASS'):
+                metadata_path = os.path.join(sys._MEIPASS, 'streamlit_metadata.json')
+            else:
+                metadata_path = 'streamlit_metadata.json'
+                
+            if os.path.exists(metadata_path):
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                return metadata['version']
+        except:
+            pass
+        # Fallback to hardcoded version
+        return '1.28.0'  # Update this to match your streamlit version
+    return original_version(package_name)
+
+def patched_distribution(package_name):
+    if package_name == 'streamlit':
+        # Create a mock distribution object
+        class MockDistribution:
+            def __init__(self, name, version):
+                self.name = name
+                self.version = version
+                self.metadata = {'Name': name, 'Version': version}
+        
+        return MockDistribution('streamlit', patched_version('streamlit'))
+    return original_distribution(package_name)
+
+# Apply patches
+importlib.metadata.version = patched_version
+importlib.metadata.distribution = patched_distribution
+
+# Now import and run the original app
+import app
+'''
+
+with open('wrapper.py', 'w') as f:
+    f.write(wrapper_content)
+"
+    
     - name: Build executable (Linux)
       if: matrix.os == 'ubuntu-latest'
       run: |
         pyinstaller --onefile \
           --name radiomics-pipeline-linux \
+          --add-data "streamlit_metadata.json:." \
           --hidden-import=streamlit \
           --hidden-import=streamlit.web.cli \
           --hidden-import=streamlit.runtime \
@@ -55,19 +143,22 @@ jobs:
           --hidden-import=scipy \
           --hidden-import=matplotlib \
           --hidden-import=seaborn \
+          --hidden-import=importlib_metadata \
+          --hidden-import=packaging \
           --collect-data streamlit \
-          app.py
+          wrapper.py
     
     - name: Build executable (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        pyinstaller --onefile --name radiomics-pipeline-windows --hidden-import=streamlit --hidden-import=streamlit.web.cli --hidden-import=streamlit.runtime --hidden-import=streamlit.runtime.scriptrunner --hidden-import=streamlit.components.v1 --hidden-import=altair --hidden-import=plotly --hidden-import=pandas --hidden-import=numpy --hidden-import=pydicom --hidden-import=SimpleITK --hidden-import=radiomics --hidden-import=sklearn --hidden-import=scipy --hidden-import=matplotlib --hidden-import=seaborn --collect-data streamlit app.py
+        pyinstaller --onefile --name radiomics-pipeline-windows --add-data "streamlit_metadata.json;." --hidden-import=streamlit --hidden-import=streamlit.web.cli --hidden-import=streamlit.runtime --hidden-import=streamlit.runtime.scriptrunner --hidden-import=streamlit.components.v1 --hidden-import=altair --hidden-import=plotly --hidden-import=pandas --hidden-import=numpy --hidden-import=pydicom --hidden-import=SimpleITK --hidden-import=radiomics --hidden-import=sklearn --hidden-import=scipy --hidden-import=matplotlib --hidden-import=seaborn --hidden-import=importlib_metadata --hidden-import=packaging --collect-data streamlit wrapper.py
     
     - name: Build executable (macOS)
       if: matrix.os == 'macos-latest'
       run: |
         pyinstaller --onefile \
           --name radiomics-pipeline-macos \
+          --add-data "streamlit_metadata.json:." \
           --hidden-import=streamlit \
           --hidden-import=streamlit.web.cli \
           --hidden-import=streamlit.runtime \
@@ -84,8 +175,10 @@ jobs:
           --hidden-import=scipy \
           --hidden-import=matplotlib \
           --hidden-import=seaborn \
+          --hidden-import=importlib_metadata \
+          --hidden-import=packaging \
           --collect-data streamlit \
-          app.py
+          wrapper.py
     
     - name: Upload artifacts (Linux)
       if: matrix.os == 'ubuntu-latest'
