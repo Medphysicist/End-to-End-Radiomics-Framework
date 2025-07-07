@@ -1,19 +1,7 @@
-# Core application and data handling
 streamlit
 pandas
 numpy
-
-# Medical imaging and radiomics
 pydicom
 rt-utils
 SimpleITK
-pyradiomics==3.0.1 
-
-# Analysis and visualization
-scikit-learn
-seaborn
-matplotlib
-
-# System utilities and configuration
-psutil
-pyyaml
+pyradiomics
