@@ -26,11 +26,12 @@ jobs:
       with:
         python-version: '3.9'
     
+    # --- THIS IS THE MODIFIED STEP ---
     - name: Install build dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install numpy
-        pip install nuitka
+        pip install numpy==1.26.4
+        pip install nuitka==1.9.3
         
     - name: Install project dependencies
       run: pip install -r requirements.txt
@@ -81,6 +82,7 @@ jobs:
           --enable-plugin=tk-inter \
           app.py
     
+    # ... (rest of the file is unchanged) ...
     - name: Upload artifacts (Linux)
       if: matrix.os == 'ubuntu-latest'
       uses: actions/upload-artifact@v4
