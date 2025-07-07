@@ -5,3 +5,4 @@ pydicom
 rt-utils
 SimpleITK
 pyradiomics
+matplotlib
