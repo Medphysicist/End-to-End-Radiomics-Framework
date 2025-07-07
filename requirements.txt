@@ -6,5 +6,8 @@ numpy
 pydicom
 rt-utils
 SimpleITK
-PyYAML # Corrected from 'yaml'
+PyYAML
+Pillow          # For 'from PIL import Image'
+plotly          # For 'import plotly.graph_objects as go'
+scikit-image    # For 'from skimage.draw import polygon'
 git+https://github.com/AIM-Harvard/pyradiomics.git@v3.1.0
