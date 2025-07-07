@@ -36,7 +36,6 @@ jobs:
       run: |
         pip install -r requirements.txt
 
-    # --- NEW STEP ADDED HERE ---
     - name: Create Streamlit config for packaging
       run: |
         mkdir .streamlit
@@ -45,26 +44,45 @@ jobs:
         headless = true\n\
         port = 8501\n\
         enableCORS = false\n\
-        \n\
-        [theme]\n\
-        base = "dark"\n\
         ' > .streamlit/config.toml
-      # Note: The above shell command works for Linux, macOS, and the default shell on Windows runners.
+      # Note: Customize the contents of config.toml as needed.
 
     - name: Build executable (Linux)
       if: matrix.os == 'ubuntu-latest'
       run: |
-        nuitka --onefile --output-filename=radiomics-pipeline-linux --include-data-dir=.streamlit=.streamlit --include-data-files=*.py=./ --include-data-files=*.md=./ --follow-imports --enable-plugin=anti-bloat app.py
+        nuitka --onefile --output-filename=radiomics-pipeline-linux \
+          --include-data-dir=.streamlit=.streamlit \
+          --include-data-files=*.py=./ \
+          --include-data-files=*.md=./ \
+          --enable-plugin=anti-bloat \
+          --no-anti-bloat=streamlit \
+          --enable-plugin=tk-inter \
+          app.py
     
     - name: Build executable (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        nuitka --onefile --output-filename=radiomics-pipeline-windows.exe --include-data-dir=.streamlit=.streamlit --include-data-files=*.py=./ --include-data-files=*.md=./ --follow-imports --enable-plugin=anti-bloat --windows-console-mode=attach app.py
+        nuitka --onefile --output-filename=radiomics-pipeline-windows.exe \
+          --include-data-dir=.streamlit=.streamlit \
+          --include-data-files=*.py=./ \
+          --include-data-files=*.md=./ \
+          --enable-plugin=anti-bloat \
+          --no-anti-bloat=streamlit \
+          --enable-plugin=tk-inter \
+          --windows-console-mode=attach \
+          app.py
     
     - name: Build executable (macOS)
       if: matrix.os == 'macos-latest'
       run: |
-        nuitka --onefile --output-filename=radiomics-pipeline-macos --include-data-dir=.streamlit=.streamlit --include-data-files=*.py=./ --include-data-files=*.md=./ --follow-imports --enable-plugin=anti-bloat app.py
+        nuitka --onefile --output-filename=radiomics-pipeline-macos \
+          --include-data-dir=.streamlit=.streamlit \
+          --include-data-files=*.py=./ \
+          --include-data-files=*.md=./ \
+          --enable-plugin=anti-bloat \
+          --no-anti-bloat=streamlit \
+          --enable-plugin=tk-inter \
+          app.py
     
     - name: Upload artifacts (Linux)
       if: matrix.os == 'ubuntu-latest'
