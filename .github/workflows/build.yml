@@ -30,7 +30,7 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install numpy
-        pip install nuitka
+        pip install pyinstaller
         
     - name: Install project dependencies
       run: |
@@ -39,24 +39,24 @@ jobs:
     - name: Build executable (Linux)
       if: matrix.os == 'ubuntu-latest'
       run: |
-        nuitka --onefile --output-filename=radiomics-pipeline-linux --follow-imports app.py
+        pyinstaller --onefile --name radiomics-pipeline-linux app.py
     
     - name: Build executable (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        nuitka --onefile --output-filename=radiomics-pipeline-windows.exe --follow-imports app.py
+        pyinstaller --onefile --name radiomics-pipeline-windows app.py
     
     - name: Build executable (macOS)
       if: matrix.os == 'macos-latest'
       run: |
-        nuitka --onefile --output-filename=radiomics-pipeline-macos --follow-imports app.py
+        pyinstaller --onefile --name radiomics-pipeline-macos app.py
     
     - name: Upload artifacts (Linux)
       if: matrix.os == 'ubuntu-latest'
       uses: actions/upload-artifact@v4
       with:
         name: radiomics-pipeline-linux
-        path: radiomics-pipeline-linux
+        path: dist/radiomics-pipeline-linux
         retention-days: 30
     
     - name: Upload artifacts (Windows)
@@ -64,7 +64,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: radiomics-pipeline-windows
-        path: radiomics-pipeline-windows.exe
+        path: dist/radiomics-pipeline-windows.exe
         retention-days: 30
     
     - name: Upload artifacts (macOS)
@@ -72,5 +72,5 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: radiomics-pipeline-macos
-        path: radiomics-pipeline-macos
+        path: dist/radiomics-pipeline-macos
         retention-days: 30
