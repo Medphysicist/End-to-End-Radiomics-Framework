@@ -47,6 +47,8 @@ jobs:
         ' > .streamlit/config.toml
       # Note: Customize the contents of config.toml as needed.
 
+    # ... (previous steps are the same) ...
+
     - name: Build executable (Linux)
       if: matrix.os == 'ubuntu-latest'
       run: |
@@ -83,7 +85,8 @@ jobs:
           --no-anti-bloat=streamlit \
           --enable-plugin=tk-inter \
           app.py
-    
+
+# ... (rest of the file is the same) ...
     - name: Upload artifacts (Linux)
       if: matrix.os == 'ubuntu-latest'
       uses: actions/upload-artifact@v4
