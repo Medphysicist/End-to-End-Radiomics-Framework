@@ -27,12 +27,82 @@ jobs:
     - name: Install build dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install numpy
-        pip install pyinstaller
+        pip install numpy==1.24.3
+        pip install pyinstaller==5.13.2
         
     - name: Install project dependencies
       run: |
         pip install -r requirements.txt
+    
+    - name: Create streamlit launcher script
+      run: |
+        cat > streamlit_launcher.py << 'EOF'
+        import sys
+        import os
+        import json
+        import importlib.metadata
+        import streamlit.web.cli as stcli
+        import streamlit as st
+        
+        # Fix NumPy import issues
+        try:
+            import numpy as np
+            # Force numpy to load properly
+            np.array([1, 2, 3])
+        except ImportError as e:
+            print(f"NumPy import error: {e}")
+            sys.exit(1)
+        
+        # Monkey patch importlib.metadata to handle streamlit
+        original_version = importlib.metadata.version
+        original_distribution = importlib.metadata.distribution
+        
+        def patched_version(package_name):
+            if package_name == 'streamlit':
+                try:
+                    # Try to load from bundled metadata
+                    if hasattr(sys, '_MEIPASS'):
+                        metadata_path = os.path.join(sys._MEIPASS, 'streamlit_metadata.json')
+                    else:
+                        metadata_path = 'streamlit_metadata.json'
+                        
+                    if os.path.exists(metadata_path):
+                        with open(metadata_path, 'r') as f:
+                            metadata = json.load(f)
+                        return metadata['version']
+                except:
+                    pass
+                # Fallback to hardcoded version
+                return '1.28.0'
+            return original_version(package_name)
+        
+        def patched_distribution(package_name):
+            if package_name == 'streamlit':
+                # Create a mock distribution object
+                class MockDistribution:
+                    def __init__(self, name, version):
+                        self.name = name
+                        self.version = version
+                        self.metadata = {'Name': name, 'Version': version}
+                
+                return MockDistribution('streamlit', patched_version('streamlit'))
+            return original_distribution(package_name)
+        
+        # Apply patches
+        importlib.metadata.version = patched_version
+        importlib.metadata.distribution = patched_distribution
+        
+        if __name__ == "__main__":
+            # Get the path to the app.py file
+            if hasattr(sys, '_MEIPASS'):
+                app_path = os.path.join(sys._MEIPASS, 'app.py')
+            else:
+                app_path = 'app.py'
+            
+            # Launch streamlit with the app
+            sys.argv = ['streamlit', 'run', app_path, '--server.headless=true', '--server.enableCORS=false', '--server.enableXsrfProtection=false']
+            stcli.main()
+        EOF
     
     - name: Create metadata workaround
       run: |
@@ -63,72 +133,29 @@ jobs:
             print(f'Error creating metadata: {e}')
         "
     
-    - name: Create wrapper script
-      run: |
-        cat > wrapper.py << 'EOF'
-        import sys
-        import os
-        import json
-        import importlib.metadata
-        
-        # Monkey patch importlib.metadata to handle streamlit
-        original_version = importlib.metadata.version
-        original_distribution = importlib.metadata.distribution
-        
-        def patched_version(package_name):
-            if package_name == 'streamlit':
-                try:
-                    # Try to load from bundled metadata
-                    if hasattr(sys, '_MEIPASS'):
-                        metadata_path = os.path.join(sys._MEIPASS, 'streamlit_metadata.json')
-                    else:
-                        metadata_path = 'streamlit_metadata.json'
-                        
-                    if os.path.exists(metadata_path):
-                        with open(metadata_path, 'r') as f:
-                            metadata = json.load(f)
-                        return metadata['version']
-                except:
-                    pass
-                # Fallback to hardcoded version
-                return '1.28.0'  # Update this to match your streamlit version
-            return original_version(package_name)
-        
-        def patched_distribution(package_name):
-            if package_name == 'streamlit':
-                # Create a mock distribution object
-                class MockDistribution:
-                    def __init__(self, name, version):
-                        self.name = name
-                        self.version = version
-                        self.metadata = {'Name': name, 'Version': version}
-                
-                return MockDistribution('streamlit', patched_version('streamlit'))
-            return original_distribution(package_name)
-        
-        # Apply patches
-        importlib.metadata.version = patched_version
-        importlib.metadata.distribution = patched_distribution
-        
-        # Now import and run the original app
-        import app
-        EOF
-    
     - name: Build executable (Linux)
       if: matrix.os == 'ubuntu-latest'
       run: |
         pyinstaller --onefile \
           --name radiomics-pipeline-linux \
+          --add-data "app.py:." \
           --add-data "streamlit_metadata.json:." \
           --hidden-import=streamlit \
           --hidden-import=streamlit.web.cli \
           --hidden-import=streamlit.runtime \
           --hidden-import=streamlit.runtime.scriptrunner \
           --hidden-import=streamlit.components.v1 \
+          --hidden-import=streamlit.web.bootstrap \
+          --hidden-import=streamlit.web.server \
+          --hidden-import=streamlit.web.server.server \
           --hidden-import=altair \
           --hidden-import=plotly \
           --hidden-import=pandas \
           --hidden-import=numpy \
+          --hidden-import=numpy.core._multiarray_umath \
+          --hidden-import=numpy.random.common \
+          --hidden-import=numpy.random.bounded_integers \
+          --hidden-import=numpy.random.entropy \
           --hidden-import=pydicom \
           --hidden-import=SimpleITK \
           --hidden-import=radiomics \
@@ -139,28 +166,41 @@ jobs:
           --hidden-import=importlib_metadata \
           --hidden-import=packaging \
           --collect-data streamlit \
-          wrapper.py
+          --collect-data numpy \
+          --collect-binaries numpy \
+          --collect-binaries scipy \
+          --collect-binaries sklearn \
+          --collect-binaries SimpleITK \
+          streamlit_launcher.py
     
     - name: Build executable (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        pyinstaller --onefile --name radiomics-pipeline-windows --add-data "streamlit_metadata.json;." --hidden-import=streamlit --hidden-import=streamlit.web.cli --hidden-import=streamlit.runtime --hidden-import=streamlit.runtime.scriptrunner --hidden-import=streamlit.components.v1 --hidden-import=altair --hidden-import=plotly --hidden-import=pandas --hidden-import=numpy --hidden-import=pydicom --hidden-import=SimpleITK --hidden-import=radiomics --hidden-import=sklearn --hidden-import=scipy --hidden-import=matplotlib --hidden-import=seaborn --hidden-import=importlib_metadata --hidden-import=packaging --collect-data streamlit wrapper.py
+        pyinstaller --onefile --name radiomics-pipeline-windows --add-data "app.py;." --add-data "streamlit_metadata.json;." --hidden-import=streamlit --hidden-import=streamlit.web.cli --hidden-import=streamlit.runtime --hidden-import=streamlit.runtime.scriptrunner --hidden-import=streamlit.components.v1 --hidden-import=streamlit.web.bootstrap --hidden-import=streamlit.web.server --hidden-import=streamlit.web.server.server --hidden-import=altair --hidden-import=plotly --hidden-import=pandas --hidden-import=numpy --hidden-import=numpy.core._multiarray_umath --hidden-import=numpy.random.common --hidden-import=numpy.random.bounded_integers --hidden-import=numpy.random.entropy --hidden-import=pydicom --hidden-import=SimpleITK --hidden-import=radiomics --hidden-import=sklearn --hidden-import=scipy --hidden-import=matplotlib --hidden-import=seaborn --hidden-import=importlib_metadata --hidden-import=packaging --collect-data streamlit --collect-data numpy --collect-binaries numpy --collect-binaries scipy --collect-binaries sklearn --collect-binaries SimpleITK streamlit_launcher.py
     
     - name: Build executable (macOS)
       if: matrix.os == 'macos-latest'
       run: |
         pyinstaller --onefile \
           --name radiomics-pipeline-macos \
+          --add-data "app.py:." \
           --add-data "streamlit_metadata.json:." \
           --hidden-import=streamlit \
           --hidden-import=streamlit.web.cli \
           --hidden-import=streamlit.runtime \
           --hidden-import=streamlit.runtime.scriptrunner \
           --hidden-import=streamlit.components.v1 \
+          --hidden-import=streamlit.web.bootstrap \
+          --hidden-import=streamlit.web.server \
+          --hidden-import=streamlit.web.server.server \
           --hidden-import=altair \
           --hidden-import=plotly \
           --hidden-import=pandas \
           --hidden-import=numpy \
+          --hidden-import=numpy.core._multiarray_umath \
+          --hidden-import=numpy.random.common \
+          --hidden-import=numpy.random.bounded_integers \
+          --hidden-import=numpy.random.entropy \
           --hidden-import=pydicom \
           --hidden-import=SimpleITK \
           --hidden-import=radiomics \
@@ -171,7 +211,12 @@ jobs:
           --hidden-import=importlib_metadata \
           --hidden-import=packaging \
           --collect-data streamlit \
-          wrapper.py
+          --collect-data numpy \
+          --collect-binaries numpy \
+          --collect-binaries scipy \
+          --collect-binaries sklearn \
+          --collect-binaries SimpleITK \
+          streamlit_launcher.py
     
     - name: Upload artifacts (Linux)
       if: matrix.os == 'ubuntu-latest'
