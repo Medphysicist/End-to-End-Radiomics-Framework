@@ -1,6 +1,5 @@
 # .github/workflows/build.yml
 name: Build Radiomics Pipeline Executables
-
 on:
   push:
     branches: [ main ]
@@ -9,7 +8,6 @@ on:
   release:
     types: [published]
   workflow_dispatch:  # Allows manual triggering
-
 jobs:
   build:
     strategy:
@@ -39,17 +37,55 @@ jobs:
     - name: Build executable (Linux)
       if: matrix.os == 'ubuntu-latest'
       run: |
-        pyinstaller --onefile --name radiomics-pipeline-linux app.py
+        pyinstaller --onefile \
+          --name radiomics-pipeline-linux \
+          --hidden-import=streamlit \
+          --hidden-import=streamlit.web.cli \
+          --hidden-import=streamlit.runtime \
+          --hidden-import=streamlit.runtime.scriptrunner \
+          --hidden-import=streamlit.components.v1 \
+          --hidden-import=altair \
+          --hidden-import=plotly \
+          --hidden-import=pandas \
+          --hidden-import=numpy \
+          --hidden-import=pydicom \
+          --hidden-import=SimpleITK \
+          --hidden-import=radiomics \
+          --hidden-import=sklearn \
+          --hidden-import=scipy \
+          --hidden-import=matplotlib \
+          --hidden-import=seaborn \
+          --collect-data streamlit \
+          app.py
     
     - name: Build executable (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        pyinstaller --onefile --name radiomics-pipeline-windows app.py
+        pyinstaller --onefile --name radiomics-pipeline-windows --hidden-import=streamlit --hidden-import=streamlit.web.cli --hidden-import=streamlit.runtime --hidden-import=streamlit.runtime.scriptrunner --hidden-import=streamlit.components.v1 --hidden-import=altair --hidden-import=plotly --hidden-import=pandas --hidden-import=numpy --hidden-import=pydicom --hidden-import=SimpleITK --hidden-import=radiomics --hidden-import=sklearn --hidden-import=scipy --hidden-import=matplotlib --hidden-import=seaborn --collect-data streamlit app.py
     
     - name: Build executable (macOS)
       if: matrix.os == 'macos-latest'
       run: |
-        pyinstaller --onefile --name radiomics-pipeline-macos app.py
+        pyinstaller --onefile \
+          --name radiomics-pipeline-macos \
+          --hidden-import=streamlit \
+          --hidden-import=streamlit.web.cli \
+          --hidden-import=streamlit.runtime \
+          --hidden-import=streamlit.runtime.scriptrunner \
+          --hidden-import=streamlit.components.v1 \
+          --hidden-import=altair \
+          --hidden-import=plotly \
+          --hidden-import=pandas \
+          --hidden-import=numpy \
+          --hidden-import=pydicom \
+          --hidden-import=SimpleITK \
+          --hidden-import=radiomics \
+          --hidden-import=sklearn \
+          --hidden-import=scipy \
+          --hidden-import=matplotlib \
+          --hidden-import=seaborn \
+          --collect-data streamlit \
+          app.py
     
     - name: Upload artifacts (Linux)
       if: matrix.os == 'ubuntu-latest'
