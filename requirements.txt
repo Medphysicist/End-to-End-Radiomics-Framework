@@ -1,15 +1,16 @@
 # requirements.txt
+# These versions are taken directly from your working local environment.
 
-streamlit>=1.28.0
-pandas>=1.5.0
-numpy>=1.21.0,<1.25.0
-scikit-learn>=1.0.0
-SimpleITK>=2.0.0
-pillow>=9.0.0
-pyyaml
-matplotlib>=3.5.0
-seaborn>=0.11.0
-scipy>=1.9.0
-scikit-image>=0.19.0
-plotly>=5.0.0
+streamlit==1.28.0
+pandas==2.0.3
+numpy==1.24.3
+pydicom==2.4.3
+SimpleITK==2.3.1
+PyYAML==6.0.1
+plotly==6.1.2
+rt-utils==1.2.7
+Pillow==10.4.0
+scikit-image
+
+# This package must be installed from GitHub for Streamlit Cloud
 git+https://github.com/AIM-Harvard/pyradiomics.git@v3.1.0
