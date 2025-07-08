@@ -4,17 +4,16 @@ This module contains all the functions for building the Streamlit user interface
 It defines the content for each tab and the sidebar.
 """
 
-# These two imports are essential for displaying the error message itself.
 import streamlit as st
+import pandas as pd
+import numpy as np
+import yaml
 import traceback
 
-# This single try-except block will attempt to import everything else.
-# If any import fails, it will now show the detailed error.
+# Import logic functions from other modules
+# A single try-except block is sufficient for production.
+# If this fails, the app cannot run, and the user should check their installation.
 try:
-    import pandas as pd
-    import numpy as np
-    import yaml
-
     from processing import (
         validate_directory_path,
         get_available_directories,
@@ -30,17 +29,14 @@ try:
         generate_correlation_heatmap
     )
     from utils import check_system_resources, categorize_contours, validate_uploaded_files
-
-except ImportError as e:
-    # This is the new, improved error reporting block.
-    st.header("💥 Application Error")
-    st.error("A critical module failed to import. The application cannot start.")
-    st.error(f"The specific error is: **{e}**")
-    st.code(traceback.format_exc(), language='text')
+except ImportError:
+    st.error(
+        "**Error: A required module could not be imported.**\n\n"
+        "This usually means the installation is incomplete or there is a dependency issue.\n"
+        "Please ensure all packages from `requirements.txt` are installed in your virtual environment."
+    )
     st.stop()
 
-
-# --- ALL OF YOUR UI FUNCTIONS START HERE, UNCHANGED ---
 
 def enhanced_data_input_section():
     """Creates the UI for allowing users to select their data source."""
@@ -790,7 +786,7 @@ def main():
         build_tab1_data_upload()
     
     with tab2:
-        build_tab2__feature_extraction()
+        build_tab2_feature_extraction()
     
     with tab3:
         build_tab3_analysis()
