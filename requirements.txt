@@ -1,5 +1,5 @@
 # requirements.txt
-# These versions are taken directly from your working local environment.
+# This file is generated from the user's working Conda environment.
 
 streamlit==1.28.0
 pandas==2.0.3
@@ -10,6 +10,7 @@ PyYAML==6.0.1
 plotly==6.1.2
 rt-utils==1.2.7
 Pillow==10.4.0
+scikit-learn==1.7.0
 scikit-image
 
 # This package must be installed from GitHub for Streamlit Cloud
