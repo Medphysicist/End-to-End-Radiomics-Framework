@@ -1,5 +1,5 @@
 # requirements.txt
-# This file is generated from the user's working Conda environment.
+# Final version based on user's working Conda environment.
 
 streamlit==1.28.0
 pandas==2.0.3
@@ -12,6 +12,7 @@ rt-utils==1.2.7
 Pillow==10.4.0
 scikit-learn==1.7.0
 scikit-image
+matplotlib==3.10.3
 
 # This package must be installed from GitHub for Streamlit Cloud
 git+https://github.com/AIM-Harvard/pyradiomics.git@v3.1.0
