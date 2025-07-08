@@ -1,13 +1,14 @@
 # requirements.txt
 
-streamlit
-pandas
-numpy
-pydicom
-rt-utils
-SimpleITK
-PyYAML
-Pillow          # For 'from PIL import Image'
-plotly          # For 'import plotly.graph_objects as go'
-scikit-image    # For 'from skimage.draw import polygon'
+streamlit>=1.28.0
+pandas>=1.5.0
+numpy>=1.21.0,<1.25.0
+scikit-learn>=1.0.0
+SimpleITK>=2.0.0
+pillow>=9.0.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+scipy>=1.9.0
+scikit-image>=0.19.0
+plotly>=5.0.0
 git+https://github.com/AIM-Harvard/pyradiomics.git@v3.1.0
