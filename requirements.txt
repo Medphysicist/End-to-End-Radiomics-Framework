@@ -14,6 +14,7 @@ scikit-learn==1.7.0
 scikit-image
 matplotlib==3.10.3
 psutil
+seaborn
 
 # This package must be installed from GitHub for Streamlit Cloud
 git+https://github.com/AIM-Harvard/pyradiomics.git@v3.1.0
