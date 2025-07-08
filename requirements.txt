@@ -13,6 +13,7 @@ Pillow==10.4.0
 scikit-learn==1.7.0
 scikit-image
 matplotlib==3.10.3
+psutil
 
 # This package must be installed from GitHub for Streamlit Cloud
 git+https://github.com/AIM-Harvard/pyradiomics.git@v3.1.0
