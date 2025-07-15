@@ -21,7 +21,10 @@ try:
         process_selected_path,
         organize_dicom_files,
         scan_uploaded_data_for_contours,
-        preprocess_uploaded_data
+        preprocess_uploaded_data,
+        analyze_directory_structure,
+        get_single_patient_info,
+        check_imaging_rtstruct_compatibility
     )
     from extraction import generate_pyradiomics_params, run_extraction
     from analysis import (
@@ -101,124 +104,427 @@ def enhanced_data_input_section():
 
 
 def build_tab1_data_upload():
-    """Builds the UI for the first tab: Data Upload & Pre-processing."""
+    """Builds the redesigned UI for Tab 1 with separate tracks for single and multiple patients."""
     
+    st.header("📤 Data Upload & Pre-processing")
+    st.markdown("Choose your workflow based on whether you're processing a single patient or multiple patients.")
+    
+    # Main workflow selection
+    workflow_type = st.radio(
+        "Select your workflow type:",
+        ["👤 Single Patient Analysis", "👥 Multiple Patients Analysis"],
+        horizontal=True,
+        help="Choose based on whether you're analyzing one patient or multiple patients from a directory"
+    )
+    
+    st.divider()
+    
+    if workflow_type == "👤 Single Patient Analysis":
+        build_single_patient_workflow()
+    else:
+        build_multiple_patients_workflow()
+
+
+def build_single_patient_workflow():
+    """Builds the UI for single patient workflow."""
+    st.subheader("👤 Single Patient Workflow")
+    st.markdown("Upload or select data for a single patient analysis.")
+    
+    # Data input section for single patient
     uploaded_files, selected_path = enhanced_data_input_section()
     
-    process_button_label = ""
-    if uploaded_files:
-        process_button_label = "🔄 Process Uploaded Files"
-    elif selected_path:
-        process_button_label = "🔄 Process Selected Directory"
-
-    if process_button_label and st.button(process_button_label, type="primary", key="process_data"):
-        data_path = None
-        with st.spinner("Processing data source..."):
-            if uploaded_files:
-                data_path = organize_dicom_files(uploaded_files)
-            elif selected_path:
-                data_path = process_selected_path(selected_path)
-
-        if data_path:
-            st.session_state['uploaded_data_path'] = data_path
-            st.success(f"✅ Data source processed. Ready to scan contours from: `{data_path}`")
-        else:
-            st.error("❌ Data processing failed. Please check your files or path.")
-
-    if st.session_state.get('uploaded_data_path'):
+    if uploaded_files or selected_path:
         st.divider()
-        st.header("Step 1.2: Select Imaging Modality and Scan for Contours")
         
-        # Modality selection
-        col1, col2 = st.columns(2)
-        with col1:
-            modality_options = ['CT', 'MR', 'PT']
-            selected_modality = st.selectbox(
-                "Select imaging modality:",
-                options=modality_options,
-                index=0,
-                help="Choose the type of imaging you want to analyze"
-            )
-        with col2:
-            if st.button("🔍 Scan Data For Available Contours", type="primary"):
-                with st.spinner(f"Scanning data for {selected_modality} series and available ROIs..."):
-                    all_contours, pat_data, pat_status, available_modalities = scan_uploaded_data_for_contours(
-                        st.session_state.uploaded_data_path, selected_modality
-                    )
-                    st.session_state.all_contours = all_contours
-                    st.session_state.patient_contour_data = pat_data
-                    st.session_state.patient_status = pat_status
-                    st.session_state.available_modalities = available_modalities
-                    st.session_state.selected_modality = selected_modality
-                    
-                    if available_modalities:
-                        st.info(f"📊 Available imaging modalities in your data: {', '.join(sorted(available_modalities))}")
-                    
-                    if selected_modality not in available_modalities:
-                        st.warning(f"⚠️ {selected_modality} modality not found in your data. Available: {', '.join(sorted(available_modalities))}")
-        
-        if st.session_state.get('all_contours'):
-            st.success(f"🎯 Scan complete! Found {len(st.session_state.all_contours)} unique contours for {st.session_state.selected_modality} imaging.")
+        # Process the data source
+        if st.button("🔄 Process Single Patient Data", type="primary", key="process_single_patient"):
+            data_path = None
+            with st.spinner("Processing single patient data..."):
+                if uploaded_files:
+                    data_path = organize_dicom_files(uploaded_files)
+                elif selected_path:
+                    data_path = process_selected_path(selected_path)
             
-            # Show scan results summary
-            with st.expander("📋 Scan Results Summary"):
-                success_count = sum(1 for status in st.session_state.patient_status.values() if status['status'] == 'success')
-                total_patients = len(st.session_state.patient_status)
-                st.metric("Successfully processed patients", f"{success_count}/{total_patients}")
+            if data_path:
+                st.session_state['uploaded_data_path'] = data_path
+                st.session_state['workflow_type'] = 'single'
                 
-                if success_count < total_patients:
-                    failed_patients = [pid for pid, status in st.session_state.patient_status.items() if status['status'] == 'error']
-                    st.warning(f"Failed to process: {', '.join(failed_patients)}")
-            
-            targets, oars, other = categorize_contours(st.session_state.all_contours)
-            all_rois = [""] + targets + oars + other
-            selected_roi = st.selectbox("Select a target contour (ROI) for extraction:", options=all_rois)
+                # Analyze single patient data
+                with st.spinner("Analyzing patient data..."):
+                    patient_info = get_single_patient_info(data_path)
+                    st.session_state['single_patient_info'] = patient_info
+                
+                display_single_patient_analysis(patient_info)
+            else:
+                st.error("❌ Failed to process patient data. Please check your files or path.")
+    
+    # Continue with existing workflow if data is processed
+    if st.session_state.get('uploaded_data_path') and st.session_state.get('workflow_type') == 'single':
+        continue_single_patient_processing()
 
-            if selected_roi:
-                st.info(f"You selected: **{selected_roi}** for **{st.session_state.selected_modality}** imaging")
+
+def build_multiple_patients_workflow():
+    """Builds the UI for multiple patients workflow."""
+    st.subheader("👥 Multiple Patients Workflow")
+    st.markdown("Analyze multiple patients from a directory structure.")
+    
+    # Data input section for multiple patients
+    uploaded_files, selected_path = enhanced_data_input_section()
+    
+    if uploaded_files or selected_path:
+        st.divider()
+        
+        # Process the data source
+        if st.button("🔄 Process Multiple Patients Data", type="primary", key="process_multiple_patients"):
+            data_path = None
+            with st.spinner("Processing multiple patients data..."):
+                if uploaded_files:
+                    data_path = organize_dicom_files(uploaded_files)
+                elif selected_path:
+                    data_path = process_selected_path(selected_path)
+            
+            if data_path:
+                st.session_state['uploaded_data_path'] = data_path
+                st.session_state['workflow_type'] = 'multiple'
                 
-                # Show which patients have this ROI
-                patients_with_roi = [pid for pid, contours in st.session_state.patient_contour_data.items() 
-                                   if any(selected_roi.lower() in contour.lower() for contour in contours)]
-                st.info(f"📊 This ROI is available in {len(patients_with_roi)} patients: {', '.join(patients_with_roi)}")
+                # Analyze directory structure
+                with st.spinner("Analyzing directory structure..."):
+                    analysis = analyze_directory_structure(data_path)
+                    st.session_state['directory_analysis'] = analysis
                 
-                st.divider()
-                st.header("Step 1.3: Generate NIfTI Files")
-                if st.button("🚀 Start Pre-processing & Generate NIfTI", type="primary"):
-                    with st.spinner("Generating NIfTI files... This may take a while."):
-                        result_df = preprocess_uploaded_data(
-                            st.session_state.uploaded_data_path, 
-                            selected_roi, 
-                            st.session_state.selected_modality
-                        )
-                    if not result_df.empty:
-                        st.success(f"✅ Successfully pre-processed {len(result_df)} patients with {st.session_state.selected_modality} imaging!")
-                        st.session_state.dataset_df = result_df
-                        st.session_state.preprocessing_done = True
-                        
-                        # Enhanced results display
-                        st.subheader("📊 Pre-processing Results")
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Patients Processed", len(result_df))
-                        with col2:
-                            st.metric("Imaging Modality", st.session_state.selected_modality)
-                        with col3:
-                            st.metric("Target ROI", selected_roi)
-                        
-                        st.dataframe(result_df)
-                        
-                        # Download option for the dataset summary
-                        csv = result_df.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            "📥 Download Dataset Summary",
-                            csv,
-                            f"dataset_summary_{st.session_state.selected_modality}_{selected_roi}.csv",
-                            "text/csv",
-                            key='download-csv'
-                        )
-                    else:
-                        st.error("❌ Pre-processing failed. Please check your data and try again.")
+                display_directory_analysis(analysis)
+            else:
+                st.error("❌ Failed to process directory data. Please check your files or path.")
+    
+    # Continue with existing workflow if data is processed
+    if st.session_state.get('uploaded_data_path') and st.session_state.get('workflow_type') == 'multiple':
+        continue_multiple_patients_processing()
+
+
+def display_single_patient_analysis(patient_info):
+    """Displays analysis results for a single patient."""
+    st.subheader("📊 Single Patient Analysis Results")
+    
+    if patient_info['errors']:
+        st.error("❌ Errors encountered during analysis:")
+        for error in patient_info['errors']:
+            st.error(f"• {error}")
+        return
+    
+    # Overview metrics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Patient ID", patient_info['patient_id'])
+    with col2:
+        st.metric("Imaging Series", len(patient_info['imaging_series']))
+    with col3:
+        st.metric("RTSTRUCT Files", len(patient_info['rtstruct_files']))
+    with col4:
+        st.metric("Compatible Pairs", len(patient_info['compatible_pairs']))
+    
+    # Available modalities
+    if patient_info['modalities']:
+        st.info(f"🔍 Available imaging modalities: {', '.join(patient_info['modalities'])}")
+    
+    # Detailed breakdown
+    show_details = st.checkbox("Show detailed processing information", key="single_patient_details")
+    
+    if show_details:
+        st.subheader("🔍 Detailed Analysis")
+        
+        # Imaging series details
+        if patient_info['imaging_series']:
+            st.write("**Imaging Series:**")
+            for series_uid, series_info in patient_info['imaging_series'].items():
+                with st.expander(f"📋 {series_info['modality']} - {series_info['series_description']}"):
+                    st.write(f"- **Series UID:** {series_uid}")
+                    st.write(f"- **Modality:** {series_info['modality']}")
+                    st.write(f"- **Series Path:** {series_info['series_path']}")
+                    st.write(f"- **File Count:** {series_info['file_count']}")
+        
+        # RTSTRUCT files
+        if patient_info['rtstruct_files']:
+            st.write("**RTSTRUCT Files:**")
+            for i, rt_file in enumerate(patient_info['rtstruct_files'], 1):
+                st.write(f"{i}. {rt_file}")
+        
+        # Compatible pairs
+        if patient_info['compatible_pairs']:
+            st.write("**Compatible Imaging/RTSTRUCT Pairs:**")
+            for i, pair in enumerate(patient_info['compatible_pairs'], 1):
+                with st.expander(f"✅ Pair {i}: {pair['modality']} - {pair['series_description']}"):
+                    st.write(f"- **Modality:** {pair['modality']}")
+                    st.write(f"- **Series UID:** {pair['series_uid']}")
+                    st.write(f"- **Available Contours:** {', '.join(pair['contours'])}")
+                    st.write(f"- **Contour Count:** {pair['contour_count']}")
+
+
+def display_directory_analysis(analysis):
+    """Displays comprehensive analysis results for multiple patients directory."""
+    st.subheader("📊 Directory Analysis Results")
+    
+    if analysis['errors']:
+        st.error("❌ Errors encountered during analysis:")
+        for error in analysis['errors']:
+            st.error(f"• {error}")
+    
+    # Overview metrics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Patients", analysis['total_patients'])
+    with col2:
+        st.metric("Total Imaging Series", analysis['total_imaging_series'])
+    with col3:
+        st.metric("Total RTSTRUCT Files", analysis['total_rtstruct_files'])
+    with col4:
+        st.metric("Compatible Pairs", analysis['compatible_pairs'])
+    
+    # Available modalities
+    if analysis['available_modalities']:
+        st.info(f"🔍 Available imaging modalities: {', '.join(analysis['available_modalities'])}")
+    
+    # Patient-by-patient breakdown
+    show_details = st.checkbox("Show detailed processing information for each patient", key="multiple_patients_details")
+    
+    if show_details:
+        st.subheader("🔍 Patient-by-Patient Analysis")
+        
+        for patient_id, patient_info in analysis['patients'].items():
+            with st.expander(f"👤 Patient: {patient_id}"):
+                # Patient metrics
+                pcol1, pcol2, pcol3 = st.columns(3)
+                with pcol1:
+                    st.metric("Imaging Series", len(patient_info['imaging_series']))
+                with pcol2:
+                    st.metric("RTSTRUCT Files", len(patient_info['rtstruct_files']))
+                with pcol3:
+                    st.metric("Compatible Pairs", len(patient_info['compatible_pairs']))
+                
+                # Patient modalities
+                if patient_info['modalities']:
+                    st.write(f"**Modalities:** {', '.join(patient_info['modalities'])}")
+                
+                # Patient errors
+                if patient_info['errors']:
+                    st.warning("⚠️ Issues found:")
+                    for error in patient_info['errors']:
+                        st.write(f"• {error}")
+                
+                # Compatible pairs for this patient
+                if patient_info['compatible_pairs']:
+                    st.write("**Compatible Pairs:**")
+                    for pair in patient_info['compatible_pairs']:
+                        st.write(f"• {pair['modality']} - {pair['series_description']} ({pair['contour_count']} contours)")
+    
+    # Summary statistics
+    if analysis['patients']:
+        st.subheader("📈 Summary Statistics")
+        
+        # Calculate statistics
+        patients_with_data = sum(1 for p in analysis['patients'].values() if p['imaging_series'])
+        patients_with_rtstruct = sum(1 for p in analysis['patients'].values() if p['rtstruct_files'])
+        patients_with_compatible = sum(1 for p in analysis['patients'].values() if p['compatible_pairs'])
+        
+        scol1, scol2, scol3 = st.columns(3)
+        with scol1:
+            st.metric("Patients with Imaging Data", f"{patients_with_data}/{analysis['total_patients']}")
+        with scol2:
+            st.metric("Patients with RTSTRUCT", f"{patients_with_rtstruct}/{analysis['total_patients']}")
+        with scol3:
+            st.metric("Patients Ready for Analysis", f"{patients_with_compatible}/{analysis['total_patients']}")
+
+
+def continue_single_patient_processing():
+    """Continues processing for single patient workflow."""
+    st.divider()
+    st.header("Step 1.2: Configure Single Patient Processing")
+    
+    patient_info = st.session_state.get('single_patient_info', {})
+    
+    if not patient_info.get('compatible_pairs'):
+        st.warning("⚠️ No compatible imaging/RTSTRUCT pairs found for this patient.")
+        return
+    
+    # Let user select which compatible pair to use
+    st.subheader("🎯 Select Imaging/RTSTRUCT Pair")
+    
+    pair_options = []
+    for i, pair in enumerate(patient_info['compatible_pairs']):
+        pair_options.append(f"{pair['modality']} - {pair['series_description']} ({pair['contour_count']} contours)")
+    
+    selected_pair_idx = st.selectbox(
+        "Choose the imaging/RTSTRUCT pair to process:",
+        range(len(pair_options)),
+        format_func=lambda x: pair_options[x] if x < len(pair_options) else "Select a pair..."
+    )
+    
+    if selected_pair_idx is not None:
+        selected_pair = patient_info['compatible_pairs'][selected_pair_idx]
+        
+        st.info(f"✅ Selected: {selected_pair['modality']} - {selected_pair['series_description']}")
+        
+        # Show available contours for this pair
+        st.subheader("🎯 Select Target Contour")
+        
+        targets, oars, other = categorize_contours(selected_pair['contours'])
+        all_rois = [""] + targets + oars + other
+        selected_roi = st.selectbox("Select a target contour (ROI) for extraction:", options=all_rois)
+        
+        if selected_roi:
+            st.info(f"Selected ROI: **{selected_roi}** for **{selected_pair['modality']}** imaging")
+            
+            # Store selection in session state
+            st.session_state['selected_pair'] = selected_pair
+            st.session_state['selected_roi'] = selected_roi
+            st.session_state['selected_modality'] = selected_pair['modality']
+            
+            # Pre-processing step
+            st.divider()
+            st.header("Step 1.3: Generate NIfTI Files")
+            if st.button("🚀 Start Pre-processing & Generate NIfTI", type="primary"):
+                with st.spinner("Generating NIfTI files... This may take a while."):
+                    result_df = preprocess_uploaded_data(
+                        st.session_state.uploaded_data_path, 
+                        selected_roi, 
+                        selected_pair['modality']
+                    )
+                if not result_df.empty:
+                    st.success(f"✅ Successfully pre-processed single patient with {selected_pair['modality']} imaging!")
+                    st.session_state.dataset_df = result_df
+                    st.session_state.preprocessing_done = True
+                    
+                    # Enhanced results display
+                    st.subheader("📊 Pre-processing Results")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Patients Processed", len(result_df))
+                    with col2:
+                        st.metric("Imaging Modality", selected_pair['modality'])
+                    with col3:
+                        st.metric("Target ROI", selected_roi)
+                    
+                    st.dataframe(result_df)
+                    
+                    # Download option
+                    csv = result_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        "📥 Download Dataset Summary",
+                        csv,
+                        f"dataset_summary_{selected_pair['modality']}_{selected_roi}.csv",
+                        "text/csv",
+                        key='download-csv-single'
+                    )
+                else:
+                    st.error("❌ Pre-processing failed. Please check your data and try again.")
+
+
+def continue_multiple_patients_processing():
+    """Continues processing for multiple patients workflow."""
+    st.divider()
+    st.header("Step 1.2: Configure Multiple Patients Processing")
+    
+    analysis = st.session_state.get('directory_analysis', {})
+    
+    if not analysis.get('compatible_pairs'):
+        st.warning("⚠️ No compatible imaging/RTSTRUCT pairs found in the directory.")
+        return
+    
+    # Show processing readiness
+    st.subheader("📊 Processing Readiness Summary")
+    
+    # Calculate patients ready for each modality
+    modality_readiness = {}
+    for patient_info in analysis['patients'].values():
+        for pair in patient_info['compatible_pairs']:
+            modality = pair['modality']
+            if modality not in modality_readiness:
+                modality_readiness[modality] = 0
+            modality_readiness[modality] += 1
+    
+    # Display readiness by modality
+    for modality, count in modality_readiness.items():
+        st.info(f"**{modality}**: {count} patients ready for processing")
+    
+    # Let user select modality for processing
+    st.subheader("🎯 Select Processing Configuration")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_modality = st.selectbox(
+            "Select imaging modality for processing:",
+            options=list(modality_readiness.keys()),
+            help="Choose the modality to process across all patients"
+        )
+    
+    with col2:
+        # Get all available contours for this modality
+        all_contours = set()
+        for patient_info in analysis['patients'].values():
+            for pair in patient_info['compatible_pairs']:
+                if pair['modality'] == selected_modality:
+                    all_contours.update(pair['contours'])
+        
+        targets, oars, other = categorize_contours(list(all_contours))
+        all_rois = [""] + targets + oars + other
+        selected_roi = st.selectbox("Select target contour (ROI) for extraction:", options=all_rois)
+    
+    if selected_modality and selected_roi:
+        # Show which patients will be processed
+        eligible_patients = []
+        for patient_id, patient_info in analysis['patients'].items():
+            for pair in patient_info['compatible_pairs']:
+                if pair['modality'] == selected_modality and selected_roi in pair['contours']:
+                    eligible_patients.append(patient_id)
+                    break
+        
+        st.info(f"✅ **{len(eligible_patients)} patients** will be processed with **{selected_modality}** imaging and **{selected_roi}** ROI")
+        
+        if eligible_patients:
+            st.write(f"**Eligible patients:** {', '.join(eligible_patients)}")
+            
+            # Store selection in session state
+            st.session_state['selected_modality'] = selected_modality
+            st.session_state['selected_roi'] = selected_roi
+            st.session_state['eligible_patients'] = eligible_patients
+            
+            # Pre-processing step
+            st.divider()
+            st.header("Step 1.3: Generate NIfTI Files")
+            if st.button("🚀 Start Pre-processing & Generate NIfTI", type="primary"):
+                with st.spinner("Generating NIfTI files for multiple patients... This may take a while."):
+                    result_df = preprocess_uploaded_data(
+                        st.session_state.uploaded_data_path, 
+                        selected_roi, 
+                        selected_modality
+                    )
+                if not result_df.empty:
+                    st.success(f"✅ Successfully pre-processed {len(result_df)} patients with {selected_modality} imaging!")
+                    st.session_state.dataset_df = result_df
+                    st.session_state.preprocessing_done = True
+                    
+                    # Enhanced results display
+                    st.subheader("📊 Pre-processing Results")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Patients Processed", len(result_df))
+                    with col2:
+                        st.metric("Imaging Modality", selected_modality)
+                    with col3:
+                        st.metric("Target ROI", selected_roi)
+                    
+                    st.dataframe(result_df)
+                    
+                    # Download option
+                    csv = result_df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        "📥 Download Dataset Summary",
+                        csv,
+                        f"dataset_summary_{selected_modality}_{selected_roi}.csv",
+                        "text/csv",
+                        key='download-csv-multiple'
+                    )
+                else:
+                    st.error("❌ Pre-processing failed. Please check your data and try again.")
 
 
 def build_tab2_feature_extraction():

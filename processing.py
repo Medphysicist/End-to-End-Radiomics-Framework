@@ -52,6 +52,227 @@ def validate_directory_path(path):
     return ["No DICOM (.dcm) files found in the specified directory."]
 
 
+def analyze_directory_structure(data_path):
+    """
+    Analyzes directory structure to provide detailed patient and imaging information.
+    
+    Returns:
+        dict: Dictionary containing comprehensive analysis of the directory structure
+    """
+    analysis = {
+        'total_patients': 0,
+        'patients': {},
+        'total_imaging_series': 0,
+        'total_rtstruct_files': 0,
+        'available_modalities': set(),
+        'compatible_pairs': 0,
+        'errors': []
+    }
+    
+    if not data_path or not os.path.isdir(data_path):
+        analysis['errors'].append("Invalid directory path")
+        return analysis
+    
+    try:
+        patient_dirs = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
+        analysis['total_patients'] = len(patient_dirs)
+        
+        for patient_id in patient_dirs:
+            patient_path = os.path.join(data_path, patient_id)
+            patient_info = {
+                'patient_id': patient_id,
+                'imaging_series': {},
+                'rtstruct_files': [],
+                'modalities': set(),
+                'compatible_pairs': [],
+                'errors': []
+            }
+            
+            # Scan all DICOM files in patient directory
+            for dirpath, _, filenames in os.walk(patient_path):
+                for filename in filenames:
+                    if not filename.lower().endswith(('.dcm', '.ima')) and '.' in filename:
+                        continue
+                    
+                    full_path = os.path.join(dirpath, filename)
+                    try:
+                        dcm = pydicom.dcmread(full_path, stop_before_pixels=True)
+                        modality = getattr(dcm, 'Modality', 'Unknown')
+                        
+                        if modality == 'RTSTRUCT':
+                            patient_info['rtstruct_files'].append(full_path)
+                            analysis['total_rtstruct_files'] += 1
+                        elif modality in ['CT', 'MR', 'PT', 'CBCT']:
+                            series_uid = getattr(dcm, 'SeriesInstanceUID', 'UnknownSeries')
+                            series_description = getattr(dcm, 'SeriesDescription', 'No Description')
+                            
+                            if series_uid not in patient_info['imaging_series']:
+                                patient_info['imaging_series'][series_uid] = {
+                                    'modality': modality,
+                                    'series_description': series_description,
+                                    'series_path': dirpath,
+                                    'file_count': 0
+                                }
+                                analysis['total_imaging_series'] += 1
+                            
+                            patient_info['imaging_series'][series_uid]['file_count'] += 1
+                            patient_info['modalities'].add(modality)
+                            analysis['available_modalities'].add(modality)
+                            
+                    except Exception as e:
+                        continue
+            
+            # Check for compatible pairs
+            for rt_file in patient_info['rtstruct_files']:
+                for series_uid, series_info in patient_info['imaging_series'].items():
+                    try:
+                        # Test compatibility without loading full data
+                        rtstruct = RTStructBuilder.create_from(
+                            dicom_series_path=series_info['series_path'],
+                            rt_struct_path=rt_file
+                        )
+                        contours = rtstruct.get_roi_names()
+                        
+                        patient_info['compatible_pairs'].append({
+                            'series_uid': series_uid,
+                            'modality': series_info['modality'],
+                            'series_description': series_info['series_description'],
+                            'rtstruct_file': rt_file,
+                            'contours': contours,
+                            'contour_count': len(contours)
+                        })
+                        analysis['compatible_pairs'] += 1
+                    except Exception:
+                        continue
+            
+            analysis['patients'][patient_id] = patient_info
+        
+        # Convert sets to sorted lists for JSON serialization
+        analysis['available_modalities'] = sorted(list(analysis['available_modalities']))
+        for patient_info in analysis['patients'].values():
+            patient_info['modalities'] = sorted(list(patient_info['modalities']))
+            
+    except Exception as e:
+        analysis['errors'].append(f"Error analyzing directory: {str(e)}")
+    
+    return analysis
+
+
+def get_single_patient_info(patient_path):
+    """
+    Analyzes a single patient directory to provide detailed information about available imaging series and RTSTRUCT files.
+    
+    Args:
+        patient_path (str): Path to single patient directory
+        
+    Returns:
+        dict: Detailed information about the patient's imaging data
+    """
+    patient_info = {
+        'patient_id': os.path.basename(patient_path),
+        'imaging_series': {},
+        'rtstruct_files': [],
+        'modalities': set(),
+        'compatible_pairs': [],
+        'errors': []
+    }
+    
+    if not os.path.isdir(patient_path):
+        patient_info['errors'].append("Not a valid directory")
+        return patient_info
+    
+    try:
+        # Scan all DICOM files in patient directory
+        for dirpath, _, filenames in os.walk(patient_path):
+            for filename in filenames:
+                if not filename.lower().endswith(('.dcm', '.ima')) and '.' in filename:
+                    continue
+                
+                full_path = os.path.join(dirpath, filename)
+                try:
+                    dcm = pydicom.dcmread(full_path, stop_before_pixels=True)
+                    modality = getattr(dcm, 'Modality', 'Unknown')
+                    
+                    if modality == 'RTSTRUCT':
+                        patient_info['rtstruct_files'].append(full_path)
+                    elif modality in ['CT', 'MR', 'PT', 'CBCT']:
+                        series_uid = getattr(dcm, 'SeriesInstanceUID', 'UnknownSeries')
+                        series_description = getattr(dcm, 'SeriesDescription', 'No Description')
+                        
+                        if series_uid not in patient_info['imaging_series']:
+                            patient_info['imaging_series'][series_uid] = {
+                                'modality': modality,
+                                'series_description': series_description,
+                                'series_path': dirpath,
+                                'file_count': 0
+                            }
+                        
+                        patient_info['imaging_series'][series_uid]['file_count'] += 1
+                        patient_info['modalities'].add(modality)
+                        
+                except Exception as e:
+                    continue
+        
+        # Check for compatible pairs
+        for rt_file in patient_info['rtstruct_files']:
+            for series_uid, series_info in patient_info['imaging_series'].items():
+                try:
+                    rtstruct = RTStructBuilder.create_from(
+                        dicom_series_path=series_info['series_path'],
+                        rt_struct_path=rt_file
+                    )
+                    contours = rtstruct.get_roi_names()
+                    
+                    patient_info['compatible_pairs'].append({
+                        'series_uid': series_uid,
+                        'modality': series_info['modality'],
+                        'series_description': series_info['series_description'],
+                        'rtstruct_file': rt_file,
+                        'contours': contours,
+                        'contour_count': len(contours)
+                    })
+                except Exception:
+                    continue
+        
+        # Convert sets to sorted lists
+        patient_info['modalities'] = sorted(list(patient_info['modalities']))
+        
+    except Exception as e:
+        patient_info['errors'].append(f"Error analyzing patient directory: {str(e)}")
+    
+    return patient_info
+
+
+def check_imaging_rtstruct_compatibility(imaging_series_path, rtstruct_path):
+    """
+    Checks if an imaging series and RTSTRUCT file are compatible.
+    
+    Args:
+        imaging_series_path (str): Path to imaging series directory
+        rtstruct_path (str): Path to RTSTRUCT file
+        
+    Returns:
+        dict: Compatibility result with details
+    """
+    result = {
+        'compatible': False,
+        'contours': [],
+        'error': None
+    }
+    
+    try:
+        rtstruct = RTStructBuilder.create_from(
+            dicom_series_path=imaging_series_path,
+            rt_struct_path=rtstruct_path
+        )
+        result['contours'] = rtstruct.get_roi_names()
+        result['compatible'] = True
+    except Exception as e:
+        result['error'] = str(e)
+    
+    return result
+
+
 # --- Data Handling and Organization ---
 
 def process_selected_path(selected_path):
