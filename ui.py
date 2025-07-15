@@ -32,7 +32,13 @@ try:
         run_lasso_selection,
         generate_correlation_heatmap
     )
-    from utils import check_system_resources, categorize_contours, validate_uploaded_files
+    from utils import (
+        check_system_resources, 
+        categorize_contours, 
+        validate_uploaded_files,
+        format_patient_summary,
+        calculate_processing_readiness
+    )
 
 except ImportError as e:
     # This is the new, improved error reporting block.
