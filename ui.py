@@ -747,13 +747,28 @@ def build_tab2_feature_extraction():
             n_jobs = 1
         
         if st.button("🔥 Start Feature Extraction", type="primary"):
-            with st.spinner("Extracting radiomics features... This may take several minutes."):
-                try:
-                    features_df = run_extraction(
-                        st.session_state.dataset_df,
-                        st.session_state.pyradiomics_params,
-                        n_jobs=n_jobs
-                    )
+    # Create containers for progress display
+    extraction_progress_container = st.container()
+    extraction_status_container = st.container()
+    
+    with extraction_progress_container:
+        extraction_progress_bar = st.progress(0)
+        extraction_progress_text = st.empty()
+        
+    with extraction_status_container:
+        extraction_status_placeholder = st.empty()
+    
+    # Store UI elements in session state for access from extraction function
+    st.session_state['extraction_progress_bar'] = extraction_progress_bar
+    st.session_state['extraction_progress_text'] = extraction_progress_text
+    st.session_state['extraction_status_placeholder'] = extraction_status_placeholder
+    
+    try:
+        features_df = run_extraction(
+            st.session_state.dataset_df,
+            st.session_state.pyradiomics_params,
+            n_jobs=n_jobs
+        )
                     
                     if not features_df.empty:
                         st.success(f"✅ Successfully extracted {features_df.shape[1]-1} features from {features_df.shape[0]} patients!")
