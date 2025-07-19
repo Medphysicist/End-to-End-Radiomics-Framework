@@ -52,227 +52,6 @@ def validate_directory_path(path):
     return ["No DICOM (.dcm) files found in the specified directory."]
 
 
-def analyze_directory_structure(data_path):
-    """
-    Analyzes directory structure to provide detailed patient and imaging information.
-    
-    Returns:
-        dict: Dictionary containing comprehensive analysis of the directory structure
-    """
-    analysis = {
-        'total_patients': 0,
-        'patients': {},
-        'total_imaging_series': 0,
-        'total_rtstruct_files': 0,
-        'available_modalities': set(),
-        'compatible_pairs': 0,
-        'errors': []
-    }
-    
-    if not data_path or not os.path.isdir(data_path):
-        analysis['errors'].append("Invalid directory path")
-        return analysis
-    
-    try:
-        patient_dirs = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
-        analysis['total_patients'] = len(patient_dirs)
-        
-        for patient_id in patient_dirs:
-            patient_path = os.path.join(data_path, patient_id)
-            patient_info = {
-                'patient_id': patient_id,
-                'imaging_series': {},
-                'rtstruct_files': [],
-                'modalities': set(),
-                'compatible_pairs': [],
-                'errors': []
-            }
-            
-            # Scan all DICOM files in patient directory
-            for dirpath, _, filenames in os.walk(patient_path):
-                for filename in filenames:
-                    if not filename.lower().endswith(('.dcm', '.ima')) and '.' in filename:
-                        continue
-                    
-                    full_path = os.path.join(dirpath, filename)
-                    try:
-                        dcm = pydicom.dcmread(full_path, stop_before_pixels=True)
-                        modality = getattr(dcm, 'Modality', 'Unknown')
-                        
-                        if modality == 'RTSTRUCT':
-                            patient_info['rtstruct_files'].append(full_path)
-                            analysis['total_rtstruct_files'] += 1
-                        elif modality in ['CT', 'MR', 'PT', 'CBCT']:
-                            series_uid = getattr(dcm, 'SeriesInstanceUID', 'UnknownSeries')
-                            series_description = getattr(dcm, 'SeriesDescription', 'No Description')
-                            
-                            if series_uid not in patient_info['imaging_series']:
-                                patient_info['imaging_series'][series_uid] = {
-                                    'modality': modality,
-                                    'series_description': series_description,
-                                    'series_path': dirpath,
-                                    'file_count': 0
-                                }
-                                analysis['total_imaging_series'] += 1
-                            
-                            patient_info['imaging_series'][series_uid]['file_count'] += 1
-                            patient_info['modalities'].add(modality)
-                            analysis['available_modalities'].add(modality)
-                            
-                    except Exception as e:
-                        continue
-            
-            # Check for compatible pairs
-            for rt_file in patient_info['rtstruct_files']:
-                for series_uid, series_info in patient_info['imaging_series'].items():
-                    try:
-                        # Test compatibility without loading full data
-                        rtstruct = RTStructBuilder.create_from(
-                            dicom_series_path=series_info['series_path'],
-                            rt_struct_path=rt_file
-                        )
-                        contours = rtstruct.get_roi_names()
-                        
-                        patient_info['compatible_pairs'].append({
-                            'series_uid': series_uid,
-                            'modality': series_info['modality'],
-                            'series_description': series_info['series_description'],
-                            'rtstruct_file': rt_file,
-                            'contours': contours,
-                            'contour_count': len(contours)
-                        })
-                        analysis['compatible_pairs'] += 1
-                    except Exception:
-                        continue
-            
-            analysis['patients'][patient_id] = patient_info
-        
-        # Convert sets to sorted lists for JSON serialization
-        analysis['available_modalities'] = sorted(list(analysis['available_modalities']))
-        for patient_info in analysis['patients'].values():
-            patient_info['modalities'] = sorted(list(patient_info['modalities']))
-            
-    except Exception as e:
-        analysis['errors'].append(f"Error analyzing directory: {str(e)}")
-    
-    return analysis
-
-
-def get_single_patient_info(patient_path):
-    """
-    Analyzes a single patient directory to provide detailed information about available imaging series and RTSTRUCT files.
-    
-    Args:
-        patient_path (str): Path to single patient directory
-        
-    Returns:
-        dict: Detailed information about the patient's imaging data
-    """
-    patient_info = {
-        'patient_id': os.path.basename(patient_path),
-        'imaging_series': {},
-        'rtstruct_files': [],
-        'modalities': set(),
-        'compatible_pairs': [],
-        'errors': []
-    }
-    
-    if not os.path.isdir(patient_path):
-        patient_info['errors'].append("Not a valid directory")
-        return patient_info
-    
-    try:
-        # Scan all DICOM files in patient directory
-        for dirpath, _, filenames in os.walk(patient_path):
-            for filename in filenames:
-                if not filename.lower().endswith(('.dcm', '.ima')) and '.' in filename:
-                    continue
-                
-                full_path = os.path.join(dirpath, filename)
-                try:
-                    dcm = pydicom.dcmread(full_path, stop_before_pixels=True)
-                    modality = getattr(dcm, 'Modality', 'Unknown')
-                    
-                    if modality == 'RTSTRUCT':
-                        patient_info['rtstruct_files'].append(full_path)
-                    elif modality in ['CT', 'MR', 'PT', 'CBCT']:
-                        series_uid = getattr(dcm, 'SeriesInstanceUID', 'UnknownSeries')
-                        series_description = getattr(dcm, 'SeriesDescription', 'No Description')
-                        
-                        if series_uid not in patient_info['imaging_series']:
-                            patient_info['imaging_series'][series_uid] = {
-                                'modality': modality,
-                                'series_description': series_description,
-                                'series_path': dirpath,
-                                'file_count': 0
-                            }
-                        
-                        patient_info['imaging_series'][series_uid]['file_count'] += 1
-                        patient_info['modalities'].add(modality)
-                        
-                except Exception as e:
-                    continue
-        
-        # Check for compatible pairs
-        for rt_file in patient_info['rtstruct_files']:
-            for series_uid, series_info in patient_info['imaging_series'].items():
-                try:
-                    rtstruct = RTStructBuilder.create_from(
-                        dicom_series_path=series_info['series_path'],
-                        rt_struct_path=rt_file
-                    )
-                    contours = rtstruct.get_roi_names()
-                    
-                    patient_info['compatible_pairs'].append({
-                        'series_uid': series_uid,
-                        'modality': series_info['modality'],
-                        'series_description': series_info['series_description'],
-                        'rtstruct_file': rt_file,
-                        'contours': contours,
-                        'contour_count': len(contours)
-                    })
-                except Exception:
-                    continue
-        
-        # Convert sets to sorted lists
-        patient_info['modalities'] = sorted(list(patient_info['modalities']))
-        
-    except Exception as e:
-        patient_info['errors'].append(f"Error analyzing patient directory: {str(e)}")
-    
-    return patient_info
-
-
-def check_imaging_rtstruct_compatibility(imaging_series_path, rtstruct_path):
-    """
-    Checks if an imaging series and RTSTRUCT file are compatible.
-    
-    Args:
-        imaging_series_path (str): Path to imaging series directory
-        rtstruct_path (str): Path to RTSTRUCT file
-        
-    Returns:
-        dict: Compatibility result with details
-    """
-    result = {
-        'compatible': False,
-        'contours': [],
-        'error': None
-    }
-    
-    try:
-        rtstruct = RTStructBuilder.create_from(
-            dicom_series_path=imaging_series_path,
-            rt_struct_path=rtstruct_path
-        )
-        result['contours'] = rtstruct.get_roi_names()
-        result['compatible'] = True
-    except Exception as e:
-        result['error'] = str(e)
-    
-    return result
-
-
 # --- Data Handling and Organization ---
 
 def process_selected_path(selected_path):
@@ -478,20 +257,33 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
     2. Finds the specified target contour.
     3. Converts the image series to a NIfTI file.
     4. Converts the RTSTRUCT contour to a NIfTI mask with proper spatial alignment.
-    5. Returns a pandas DataFrame with paths to the NIfTI files.
+    5. Returns a pandas DataFrame with paths to the NIfTI files and processing summary.
     """
     # Create a single output directory for all NIfTI files for this session
     output_dir = tempfile.mkdtemp(prefix="radiomics_nifti_")
     st.session_state['temp_output_dir'] = output_dir # Store for later cleanup
     
     dataset_records = []
+    failed_patients = {}  # Track failed patients with reasons
     patient_dirs = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
+    total_patients = len(patient_dirs)
     
-    progress_bar = st.progress(0)
+    # Get UI elements from session state for progress updates
+    progress_bar = st.session_state.get('ui_progress_bar')
+    progress_text = st.session_state.get('ui_progress_text')
+    status_placeholder = st.session_state.get('ui_status_placeholder')
     
     # Process each patient sequentially
     for i, patient_id in enumerate(patient_dirs):
-        progress_bar.progress((i + 1) / len(patient_dirs), text=f"Processing patient: {patient_id}")
+        current_progress = (i + 1) / total_patients
+        
+        # Update progress bar and text
+        if progress_bar:
+            progress_bar.progress(current_progress)
+        if progress_text:
+            progress_text.text(f"Processing patient {i+1}/{total_patients}: {patient_id} ({current_progress*100:.1f}%)")
+        if status_placeholder:
+            status_placeholder.info(f"🔄 Processing {patient_id}...")
         
         patient_path = os.path.join(data_path, patient_id)
         
@@ -525,7 +317,10 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
             
             # Select the series with the most files (likely the main imaging series)
             if not series_candidates:
-                st.warning(f"Skipping {patient_id}: No {selected_modality} image series found.")
+                reason = f"No {selected_modality} image series found"
+                failed_patients[patient_id] = {'reason': reason, 'details': f"Searched in: {patient_path}"}
+                if status_placeholder:
+                    status_placeholder.warning(f"⚠️ Skipping {patient_id}: {reason}")
                 continue
             
             # Remove duplicates and select the series with most files
@@ -538,7 +333,10 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
             series_path = best_series['path']
             
             if not rtstruct_files:
-                st.warning(f"Skipping {patient_id}: No RTSTRUCT files found.")
+                reason = "No RTSTRUCT files found"
+                failed_patients[patient_id] = {'reason': reason, 'details': f"Searched in: {patient_path}"}
+                if status_placeholder:
+                    status_placeholder.warning(f"⚠️ Skipping {patient_id}: {reason}")
                 continue
 
             # Find compatible RTSTRUCT/Image pair
@@ -553,11 +351,13 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                     compatible_pair = (series_path, rt_file, rtstruct)
                     break
                 except Exception as e:
-                    st.write(f"  - Testing RTSTRUCT compatibility failed: {e}")
                     continue
             
             if not compatible_pair:
-                st.warning(f"Skipping {patient_id}: No compatible RTSTRUCT/{selected_modality} pair found.")
+                reason = f"No compatible RTSTRUCT/{selected_modality} pair found"
+                failed_patients[patient_id] = {'reason': reason, 'details': f"Tried {len(rtstruct_files)} RTSTRUCT files"}
+                if status_placeholder:
+                    status_placeholder.warning(f"⚠️ Skipping {patient_id}: {reason}")
                 continue
             
             series_path, rt_file, rtstruct = compatible_pair
@@ -571,14 +371,20 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                     break
             
             if not actual_roi_name:
-                st.warning(f"Skipping {patient_id}: Target contour '{target_contour_name}' not found. Available: {available_rois}")
+                reason = f"Target contour '{target_contour_name}' not found"
+                failed_patients[patient_id] = {'reason': reason, 'details': f"Available contours: {available_rois}"}
+                if status_placeholder:
+                    status_placeholder.warning(f"⚠️ Skipping {patient_id}: {reason}")
                 continue
 
             # Load image series with SimpleITK
             reader = sitk.ImageSeriesReader()
             dicom_names = reader.GetGDCMSeriesFileNames(series_path)
             if not dicom_names:
-                st.warning(f"Skipping {patient_id}: No DICOM files found in series path.")
+                reason = "No DICOM files found in series path"
+                failed_patients[patient_id] = {'reason': reason, 'details': f"Series path: {series_path}"}
+                if status_placeholder:
+                    status_placeholder.warning(f"⚠️ Skipping {patient_id}: {reason}")
                 continue
             
             reader.SetFileNames(dicom_names)
@@ -601,7 +407,8 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
             
             # Verify dimensions match
             if mask_sitk.GetSize() != image_sitk.GetSize():
-                st.warning(f"Dimension mismatch for {patient_id}: Image {image_sitk.GetSize()} vs Mask {mask_sitk.GetSize()}")
+                if status_placeholder:
+                    status_placeholder.warning(f"⚠️ Dimension mismatch for {patient_id}: Image {image_sitk.GetSize()} vs Mask {mask_sitk.GetSize()}")
                 # Try to resample mask to match image
                 try:
                     resampler = sitk.ResampleImageFilter()
@@ -609,9 +416,13 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                     resampler.SetInterpolator(sitk.sitkNearestNeighbor)
                     resampler.SetDefaultPixelValue(0)
                     mask_sitk = resampler.Execute(mask_sitk)
-                    st.info(f"  - Resampled mask to match image dimensions for {patient_id}")
+                    if status_placeholder:
+                        status_placeholder.info(f"  - Resampled mask to match image dimensions for {patient_id}")
                 except Exception as e:
-                    st.error(f"Failed to resample mask for {patient_id}: {e}")
+                    reason = "Failed to resample mask"
+                    failed_patients[patient_id] = {'reason': reason, 'details': f"Resampling error: {str(e)}"}
+                    if status_placeholder:
+                        status_placeholder.error(f"❌ Failed to resample mask for {patient_id}: {e}")
                     continue
 
             # Save both image and mask as NIfTI files
@@ -628,19 +439,28 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
             try:
                 test_img = sitk.ReadImage(output_image_path)
                 test_mask = sitk.ReadImage(output_mask_path)
+                
                 if test_img.GetSize() != test_mask.GetSize():
-                    st.error(f"Size mismatch after saving for {patient_id}")
+                    reason = "Size mismatch after saving"
+                    failed_patients[patient_id] = {'reason': reason, 'details': f"Image: {test_img.GetSize()}, Mask: {test_mask.GetSize()}"}
+                    if status_placeholder:
+                        status_placeholder.error(f"❌ Size mismatch after saving for {patient_id}")
                     continue
                 
                 # Check if mask has any positive values
                 mask_array = sitk.GetArrayFromImage(test_mask)
                 if np.sum(mask_array) == 0:
-                    st.warning(f"Warning: Mask for {patient_id} appears to be empty")
+                    if status_placeholder:
+                        status_placeholder.warning(f"⚠️ Warning: Mask for {patient_id} appears to be empty")
                 else:
-                    st.info(f"  - Mask for {patient_id} contains {np.sum(mask_array)} voxels")
+                    if status_placeholder:
+                        status_placeholder.info(f"  - Mask for {patient_id} contains {np.sum(mask_array)} voxels")
                 
             except Exception as e:
-                st.error(f"Failed to verify saved files for {patient_id}: {e}")
+                reason = "Failed to verify saved files"
+                failed_patients[patient_id] = {'reason': reason, 'details': f"Verification error: {str(e)}"}
+                if status_placeholder:
+                    status_placeholder.error(f"❌ Failed to verify saved files for {patient_id}: {e}")
                 continue
             
             dataset_records.append({
@@ -650,12 +470,30 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                 'roi_name': actual_roi_name,
                 'modality': selected_modality
             })
-            st.success(f"Successfully processed {patient_id} with {selected_modality} and ROI '{actual_roi_name}'.")
+            
+            if status_placeholder:
+                status_placeholder.success(f"✅ Successfully processed {patient_id} with {selected_modality} and ROI '{actual_roi_name}'")
 
         except Exception as e:
-            st.error(f"Failed to process {patient_id}: {e}")
-            import traceback
-            st.code(traceback.format_exc())
+            reason = "Processing error"
+            failed_patients[patient_id] = {'reason': reason, 'details': str(e)}
+            if status_placeholder:
+                status_placeholder.error(f"❌ Failed to process {patient_id}: {e}")
             continue
-            
-    return pd.DataFrame(dataset_records)
+    
+    # Final progress update
+    if progress_bar:
+        progress_bar.progress(1.0)
+    if progress_text:
+        progress_text.text(f"Completed! Processed {len(dataset_records)}/{total_patients} patients successfully")
+    if status_placeholder:
+        status_placeholder.success(f"🎉 Pre-processing complete! {len(dataset_records)} patients processed successfully")
+
+    # Create processing summary
+    processing_summary = {
+        'total_patients': total_patients,
+        'successful_patients': len(dataset_records),
+        'failed_patients': failed_patients
+    }
+
+    return pd.DataFrame(dataset_records), processing_summary
