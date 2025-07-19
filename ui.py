@@ -388,41 +388,110 @@ def continue_single_patient_processing():
             st.divider()
             st.header("Step 1.3: Generate NIfTI Files")
             if st.button("🚀 Start Pre-processing & Generate NIfTI", type="primary"):
-                with st.spinner("Generating NIfTI files... This may take a while."):
-                    result_df = preprocess_uploaded_data(
-                        st.session_state.uploaded_data_path, 
-                        selected_roi, 
-                        selected_pair['modality']
-                    )
-                if not result_df.empty:
-                    st.success(f"✅ Successfully pre-processed single patient with {selected_pair['modality']} imaging!")
-                    st.session_state.dataset_df = result_df
-                    st.session_state.preprocessing_done = True
-                    
-                    # Enhanced results display
-                    st.subheader("📊 Pre-processing Results")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Patients Processed", len(result_df))
-                    with col2:
-                        st.metric("Imaging Modality", selected_pair['modality'])
-                    with col3:
-                        st.metric("Target ROI", selected_roi)
-                    
-                    st.dataframe(result_df)
-                    
-                    # Download option
-                    csv = result_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        "📥 Download Dataset Summary",
-                        csv,
-                        f"dataset_summary_{selected_pair['modality']}_{selected_roi}.csv",
-                        "text/csv",
-                        key='download-csv-single'
-                    )
-                else:
-                    st.error("❌ Pre-processing failed. Please check your data and try again.")
-
+    # Create containers for progress display
+    progress_container = st.container()
+    status_container = st.container()
+    
+    with progress_container:
+        progress_bar = st.progress(0)
+        progress_text = st.empty()
+        
+    with status_container:
+        status_placeholder = st.empty()
+    
+    # Store UI elements in session state for access from the processing function
+    st.session_state['ui_progress_bar'] = progress_bar
+    st.session_state['ui_progress_text'] = progress_text
+    st.session_state['ui_status_placeholder'] = status_placeholder
+    
+    result_df, processing_summary = preprocess_uploaded_data(
+        st.session_state.uploaded_data_path, 
+        selected_roi, 
+        st.session_state.selected_modality
+    )
+    
+    # Store processing summary for display
+    st.session_state['processing_summary'] = processing_summary
+               if not result_df.empty:
+    st.success(f"✅ Successfully pre-processed {len(result_df)} patients with {st.session_state.selected_modality} imaging!")
+    st.session_state.dataset_df = result_df
+    st.session_state.preprocessing_done = True
+    
+    # Enhanced results display with detailed success/failure breakdown
+    st.subheader("📊 Pre-processing Results")
+    
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    processing_summary = st.session_state.get('processing_summary', {})
+    
+    with col1:
+        st.metric("Total Patients", processing_summary.get('total_patients', len(result_df)))
+    with col2:
+        st.metric("Successful", len(result_df), delta=f"+{len(result_df)}")
+    with col3:
+        failed_count = processing_summary.get('total_patients', len(result_df)) - len(result_df)
+        st.metric("Failed", failed_count, delta=f"-{failed_count}" if failed_count > 0 else "0")
+    with col4:
+        success_rate = (len(result_df) / processing_summary.get('total_patients', len(result_df))) * 100 if processing_summary.get('total_patients', 0) > 0 else 100
+        st.metric("Success Rate", f"{success_rate:.1f}%")
+    
+    # Detailed breakdown
+    if processing_summary.get('failed_patients'):
+        st.subheader("⚠️ Processing Issues")
+        
+        # Create tabs for different types of information
+        success_tab, failure_tab = st.tabs(["✅ Successful Patients", "❌ Failed Patients"])
+        
+        with success_tab:
+            if not result_df.empty:
+                st.dataframe(result_df)
+        
+        with failure_tab:
+            if processing_summary.get('failed_patients'):
+                failure_data = []
+                for patient_id, details in processing_summary['failed_patients'].items():
+                    failure_data.append({
+                        'Patient ID': patient_id,
+                        'Failure Reason': details.get('reason', 'Unknown error'),
+                        'Details': details.get('details', 'No additional details')
+                    })
+                
+                failure_df = pd.DataFrame(failure_data)
+                st.dataframe(failure_df, use_container_width=True)
+                
+                # Show detailed error breakdown
+                st.subheader("📈 Failure Analysis")
+                failure_reasons = {}
+                for details in processing_summary['failed_patients'].values():
+                    reason = details.get('reason', 'Unknown error')
+                    failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+                
+                for reason, count in failure_reasons.items():
+                    st.write(f"• **{reason}**: {count} patient(s)")
+    else:
+        # If all successful, just show the results table
+        st.dataframe(result_df)
+    
+    # Download option for the dataset summary
+    csv = result_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        "📥 Download Dataset Summary",
+        csv,
+        f"dataset_summary_{st.session_state.selected_modality}_{selected_roi}.csv",
+        "text/csv",
+        key='download-csv'
+    )
+else:
+    st.error("❌ Pre-processing failed. Please check your data and try again.")
+    
+    # Show failure summary if available
+    if st.session_state.get('processing_summary', {}).get('failed_patients'):
+        with st.expander("🔍 View Error Details"):
+            processing_summary = st.session_state['processing_summary']
+            for patient_id, details in processing_summary['failed_patients'].items():
+                st.error(f"**{patient_id}**: {details.get('reason', 'Unknown error')}")
+                if details.get('details'):
+                    st.code(details['details'], language='text')
 
 def continue_multiple_patients_processing():
     """Continues processing for multiple patients workflow."""
