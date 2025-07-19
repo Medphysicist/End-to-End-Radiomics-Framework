@@ -31,7 +31,14 @@ def initialize_session_state():
         'features_df': None,             # DataFrame with extracted radiomic features
         'clinical_df': None,             # DataFrame with uploaded clinical data
         'merged_df': None,               # DataFrame with merged features and clinical data
-        'cleanup_registered': False      # Flag to ensure cleanup runs only once
+        'cleanup_registered': False,     # Flag to ensure cleanup runs only once
+        'workflow_type': None,           # Type of workflow: 'single' or 'multiple'
+        'directory_analysis': {},        # Directory analysis results for multiple patients
+        'single_patient_info': {},       # Single patient analysis results
+        'selected_pair': None,           # Selected imaging/RTSTRUCT pair for processing
+        'selected_roi': None,            # Selected ROI for processing
+        'selected_modality': None,       # Selected imaging modality
+        'eligible_patients': []          # List of patients eligible for processing
     }
     
     for key, default_value in defaults.items():
@@ -173,3 +180,65 @@ def categorize_contours(contour_list):
             other.append(contour)
 
     return sorted(targets), sorted(oars), sorted(other)
+
+
+def format_patient_summary(patient_info):
+    """
+    Formats patient information into a readable summary.
+    
+    Args:
+        patient_info (dict): Patient information dictionary
+        
+    Returns:
+        str: Formatted summary string
+    """
+    summary = []
+    summary.append(f"**Patient ID:** {patient_info['patient_id']}")
+    summary.append(f"**Imaging Series:** {len(patient_info['imaging_series'])}")
+    summary.append(f"**RTSTRUCT Files:** {len(patient_info['rtstruct_files'])}")
+    summary.append(f"**Compatible Pairs:** {len(patient_info['compatible_pairs'])}")
+    
+    if patient_info['modalities']:
+        summary.append(f"**Modalities:** {', '.join(patient_info['modalities'])}")
+    
+    if patient_info['errors']:
+        summary.append(f"**Errors:** {len(patient_info['errors'])}")
+    
+    return "\n".join(summary)
+
+
+def calculate_processing_readiness(analysis):
+    """
+    Calculates processing readiness statistics from directory analysis.
+    
+    Args:
+        analysis (dict): Directory analysis results
+        
+    Returns:
+        dict: Processing readiness statistics
+    """
+    readiness = {
+        'patients_with_imaging': 0,
+        'patients_with_rtstruct': 0,
+        'patients_ready_for_processing': 0,
+        'modality_readiness': {}
+    }
+    
+    for patient_info in analysis['patients'].values():
+        if patient_info['imaging_series']:
+            readiness['patients_with_imaging'] += 1
+        
+        if patient_info['rtstruct_files']:
+            readiness['patients_with_rtstruct'] += 1
+        
+        if patient_info['compatible_pairs']:
+            readiness['patients_ready_for_processing'] += 1
+            
+            # Count readiness by modality
+            for pair in patient_info['compatible_pairs']:
+                modality = pair['modality']
+                if modality not in readiness['modality_readiness']:
+                    readiness['modality_readiness'][modality] = 0
+                readiness['modality_readiness'][modality] += 1
+    
+    return readiness
