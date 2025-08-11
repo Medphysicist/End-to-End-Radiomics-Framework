@@ -1,114 +1,90 @@
 # extraction.py
 """
-This module handles the radiomics feature extraction process.
-It uses the PyRadiomics library to calculate features based on a
-user-defined configuration.
+This module contains functions for radiomics feature extraction using PyRadiomics.
 """
 
-import streamlit as st
+import os
+import tempfile
+import yaml
 import pandas as pd
 import numpy as np
-import yaml
-import traceback
-from radiomics import featureextractor, setVerbosity
-import logging
+import streamlit as st
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import psutil
-import multiprocessing as mp
+import radiomics
+from radiomics import featureextractor
+import SimpleITK as sitk
+import traceback
+from pathlib import Path
 
-# Set PyRadiomics verbosity. Errors will be logged to a file.
-# This prevents the Streamlit app from being cluttered with PyRadiomics logs.
-setVerbosity(logging.ERROR)
-
-# Set up logging for radiomics
-logging.getLogger('radiomics').setLevel(logging.ERROR)
-
-
-def check_system_resources():
+def validate_mask_for_extraction(mask_path, patient_id):
     """
-    Check available system resources.
+    Validates mask file before PyRadiomics extraction.
     
     Returns:
-        dict: System resource information
+        tuple: (is_valid, error_message, mask_info)
     """
     try:
-        # Get memory info
-        memory = psutil.virtual_memory()
-        available_ram_gb = memory.available / (1024**3)
+        # Load mask
+        mask_sitk = sitk.ReadImage(mask_path)
+        mask_array = sitk.GetArrayFromImage(mask_sitk)
         
-        # Get CPU count
-        cpu_count = mp.cpu_count()
+        # Basic validation
+        if mask_array.size == 0:
+            return False, "Mask file is empty", {}
         
-        return {
-            'available_ram_gb': available_ram_gb,
-            'cpu_count': cpu_count,
-            'total_ram_gb': memory.total / (1024**3)
+        # Check for any non-zero values
+        unique_values = np.unique(mask_array)
+        nonzero_count = np.sum(mask_array > 0)
+        
+        mask_info = {
+            'unique_values': unique_values.tolist(),
+            'nonzero_voxels': int(nonzero_count),
+            'total_voxels': int(mask_array.size),
+            'mask_shape': mask_array.shape,
+            'mask_dtype': str(mask_array.dtype),
+            'mask_min': float(np.min(mask_array)),
+            'mask_max': float(np.max(mask_array)),
+            'spacing': mask_sitk.GetSpacing(),
+            'origin': mask_sitk.GetOrigin(),
+            'size': mask_sitk.GetSize()
         }
+        
+        if nonzero_count == 0:
+            return False, "Mask contains no positive values (all zeros)", mask_info
+        
+        # Check if mask values are appropriate for PyRadiomics
+        if np.max(mask_array) < 0.5:
+            return False, f"Mask values too small (max: {np.max(mask_array)}), may indicate data type issue", mask_info
+        
+        return True, "Mask validation passed", mask_info
+        
     except Exception as e:
-        print(f"Error checking system resources: {e}")
-        return {
-            'available_ram_gb': 4.0,
-            'cpu_count': 1,
-            'total_ram_gb': 8.0
-        }
+        return False, f"Mask validation failed: {str(e)}", {}
 
 
-def extract_features_single_patient(args):
+def preprocess_mask_for_radiomics(mask_path, output_path=None):
     """
-    Extract features for a single patient. This function is designed to be
-    used with multiprocessing.
-    
-    Args:
-        args (tuple): Tuple containing (patient_data, params_dict)
+    Preprocesses mask to ensure compatibility with PyRadiomics.
     
     Returns:
-        tuple: (success, patient_id, features_dict or error_message)
+        str: Path to processed mask file
     """
-    patient_data, params = args
-    patient_id = patient_data.get('PatientID', 'Unknown')
+    mask_sitk = sitk.ReadImage(mask_path)
+    mask_array = sitk.GetArrayFromImage(mask_sitk)
     
-    try:
-        print(f"[Worker] Processing patient {patient_id}")
-        
-        # Get file paths
-        image_path = patient_data['image_path']
-        mask_path = patient_data['mask_path']
-        
-        print(f"[Worker] Image: {image_path}")
-        print(f"[Worker] Mask: {mask_path}")
-        
-        # Check if files exist
-        import os
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image file not found: {image_path}")
-        if not os.path.exists(mask_path):
-            raise FileNotFoundError(f"Mask file not found: {mask_path}")
-        
-        # Initialize feature extractor
-        extractor = featureextractor.RadiomicsFeatureExtractor(params)
-        
-        # Extract features
-        features = extractor.execute(image_path, mask_path)
-        
-        print(f"[Worker] Extracted {len(features)} raw features for {patient_id}")
-        
-        # Convert to regular dictionary and add patient ID
-        feature_dict = {'PatientID': patient_id}
-        feature_count = 0
-        for key, value in features.items():
-            if isinstance(value, (int, float, np.integer, np.floating)):
-                feature_dict[key] = float(value)
-                feature_count += 1
-            else:
-                feature_dict[key] = str(value)
-        
-        print(f"[Worker] Converted {feature_count} numeric features for {patient_id}")
-        return True, patient_id, feature_dict
-        
-    except Exception as e:
-        error_msg = f"Error type: {type(e).__name__}, Message: {str(e)}"
-        print(f"[Worker] ❌ Failed {patient_id}: {error_msg}")
-        return False, patient_id, error_msg
+    # Convert to binary mask (0 and 1)
+    processed_array = (mask_array > 0).astype(np.uint8)
+    
+    # Create new SimpleITK image
+    processed_mask = sitk.GetImageFromArray(processed_array)
+    processed_mask.CopyInformation(mask_sitk)
+    
+    # Save processed mask
+    if output_path is None:
+        output_path = mask_path.replace('.nii.gz', '_processed.nii.gz')
+    
+    sitk.WriteImage(processed_mask, output_path)
+    return output_path
 
 
 def generate_pyradiomics_params(feature_classes=None, normalize_image=True, 
@@ -116,23 +92,8 @@ def generate_pyradiomics_params(feature_classes=None, normalize_image=True,
                                bin_width=25, interpolator='sitkBSpline', 
                                pad_distance=5, geometryTolerance=0.0001):
     """
-    Generate PyRadiomics parameter configuration.
-    
-    Args:
-        feature_classes (dict): Dictionary of feature classes to enable
-        normalize_image (bool): Whether to normalize the image
-        resample_pixel_spacing (bool): Whether to resample pixel spacing
-        pixel_spacing (float): Pixel spacing for resampling
-        bin_width (int): Bin width for discretization
-        interpolator (str): Interpolation method
-        pad_distance (int): Padding distance
-        geometryTolerance (float): Geometry tolerance
-    
-    Returns:
-        dict: PyRadiomics parameter configuration
+    Generates PyRadiomics parameter configuration based on user inputs.
     """
-    
-    # Default feature classes if none provided
     if feature_classes is None:
         feature_classes = {
             'firstorder': True,
@@ -144,7 +105,6 @@ def generate_pyradiomics_params(feature_classes=None, normalize_image=True,
             'gldm': True
         }
     
-    # Create the parameter configuration
     params = {
         'setting': {
             'binWidth': bin_width,
@@ -153,7 +113,7 @@ def generate_pyradiomics_params(feature_classes=None, normalize_image=True,
             'geometryTolerance': geometryTolerance
         },
         'imageType': {
-            'Original': {}  # Original image type
+            'Original': {}
         },
         'featureClass': {}
     }
@@ -175,336 +135,402 @@ def generate_pyradiomics_params(feature_classes=None, normalize_image=True,
     return params
 
 
-def build_tab2_feature_extraction():
-    """Builds the UI for the second tab: Feature Extraction."""
-    
-    # Check if preprocessing is done
-    if not st.session_state.get('preprocessing_done', False):
-        st.warning("⚠️ Please complete the data upload and pre-processing steps first.")
-        return
-    
-    st.header("Step 2: Radiomics Feature Extraction")
-    
-    # PyRadiomics configuration
-    st.subheader("🔧 PyRadiomics Configuration")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.write("**Feature Classes to Extract:**")
-        feature_classes = {}
-        feature_classes['firstorder'] = st.checkbox("First Order Statistics", value=True)
-        feature_classes['shape'] = st.checkbox("Shape Features", value=True)
-        feature_classes['glcm'] = st.checkbox("GLCM Features", value=True)
-        feature_classes['glrlm'] = st.checkbox("GLRLM Features", value=True)
-        feature_classes['glszm'] = st.checkbox("GLSZM Features", value=True)
-        feature_classes['ngtdm'] = st.checkbox("NGTDM Features", value=True)
-        feature_classes['gldm'] = st.checkbox("GLDM Features", value=True)
-    
-    with col2:
-        st.write("**Preprocessing Settings:**")
-        normalize_image = st.checkbox("Normalize Image", value=True)
-        resample_pixel_spacing = st.checkbox("Resample Pixel Spacing", value=False)
-        bin_width = st.number_input("Bin Width", min_value=1, max_value=100, value=25)
+def extract_features_single_patient(args):
+    """
+    Extract features for a single patient - designed for parallel processing.
+    Args is a tuple of (patient_data, params_dict, patient_index, total_patients)
+    """
+    try:
+        patient_data, params_dict, patient_index, total_patients = args
         
-        if resample_pixel_spacing:
-            pixel_spacing = st.number_input("Pixel Spacing (mm)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
-        else:
-            pixel_spacing = None
-    
-    # Advanced settings
-    with st.expander("⚙️ Advanced Settings"):
-        interpolator = st.selectbox(
-            "Interpolator",
-            ["sitkBSpline", "sitkLinear", "sitkNearestNeighbor"],
-            index=0
-        )
+        patient_id = patient_data['patient_id']
+        image_path = patient_data['image_path']
+        mask_path = patient_data['mask_path']
         
-        pad_distance = st.number_input("Pad Distance", min_value=0, max_value=20, value=5)
+        # Verify files exist
+        if not os.path.exists(image_path) or not os.path.exists(mask_path):
+            error_msg = f"Missing files for {patient_id}: Image={os.path.exists(image_path)}, Mask={os.path.exists(mask_path)}"
+            return {'patient_id': patient_id, 'error': error_msg}
         
-        geometryTolerance = st.number_input(
-            "Geometry Tolerance", 
-            min_value=0.0, 
-            max_value=1.0, 
-            value=0.0001, 
-            format="%.6f"
-        )
-    
-    # Generate parameter file
-    if st.button("🔄 Generate PyRadiomics Parameters", type="secondary"):
-        with st.spinner("Generating parameter configuration..."):
+        # Validate mask before extraction
+        is_valid, validation_msg, mask_info = validate_mask_for_extraction(mask_path, patient_id)
+        if not is_valid:
+            error_msg = f"Mask validation failed for {patient_id}: {validation_msg}"
+            detailed_error = f"{error_msg}\nMask info: {mask_info}"
+            return {'patient_id': patient_id, 'error': detailed_error}
+        
+        # Preprocess mask if needed
+        processed_mask_path = mask_path
+        if mask_info['mask_max'] != 1.0 or mask_info['mask_dtype'] != 'uint8':
             try:
-                params = generate_pyradiomics_params(
-                    feature_classes=feature_classes,
-                    normalize_image=normalize_image,
-                    resample_pixel_spacing=resample_pixel_spacing,
-                    pixel_spacing=pixel_spacing,
-                    bin_width=bin_width,
-                    interpolator=interpolator,
-                    pad_distance=pad_distance,
-                    geometryTolerance=geometryTolerance
-                )
-                
-                st.session_state.pyradiomics_params = params
-                st.success("✅ PyRadiomics parameters generated successfully!")
-                
-                # Display the parameters
-                with st.expander("📋 Generated Parameters"):
-                    st.code(yaml.dump(params, default_flow_style=False), language='yaml')
-                    
-            except Exception as e:
-                st.error(f"❌ Error generating parameters: {str(e)}")
-                with st.expander("🔍 Error Details"):
-                    st.code(traceback.format_exc())
-    
-    # Feature extraction
-    if st.session_state.get('pyradiomics_params'):
-        st.divider()
-        st.subheader("🚀 Run Feature Extraction")
+                processed_mask_path = preprocess_mask_for_radiomics(mask_path)
+            except Exception as preprocess_error:
+                error_msg = f"Mask preprocessing failed for {patient_id}: {str(preprocess_error)}"
+                return {'patient_id': patient_id, 'error': error_msg}
         
-        # Resource check with error handling
+        # Initialize extractor
+        extractor = featureextractor.RadiomicsFeatureExtractor()
+        
+        # Configure extractor with parameters
+        for key, value in params_dict.get('setting', {}).items():
+            extractor.settings[key] = value
+        
+        # Enable feature classes
+        extractor.disableAllFeatures()
+        for feature_class in params_dict.get('featureClass', {}):
+            extractor.enableFeatureClassByName(feature_class)
+        
+        # Extract features
         try:
-            resource_info = check_system_resources()
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                ram_gb = resource_info.get('available_ram_gb', 0)
-                st.metric("Available RAM", f"{ram_gb:.1f} GB")
-            with col2:
-                cpu_count = resource_info.get('cpu_count', 1)
-                st.metric("CPU Cores", cpu_count)
-            with col3:
-                st.metric("Patients to Process", len(st.session_state.dataset_df))
-        except Exception as e:
-            st.warning(f"Could not get system resources: {str(e)}")
-            cpu_count = 1
-            ram_gb = 0
+            features = extractor.execute(image_path, processed_mask_path)
+            
+            # Convert to flat dictionary
+            feature_dict = {'PatientID': patient_id}
+            for key, value in features.items():
+                if not key.startswith('diagnostics_'):
+                    # Convert numpy types to Python native types
+                    if isinstance(value, (np.integer, np.floating)):
+                        value = value.item()
+                    elif isinstance(value, np.ndarray):
+                        value = value.tolist()
+                    feature_dict[key] = value
+            
+            return feature_dict
+            
+        except Exception as extraction_error:
+            if "No labels found" in str(extraction_error):
+                detailed_error = f"PyRadiomics 'No labels found' error for {patient_id}. Mask info: {mask_info}"
+                return {'patient_id': patient_id, 'error': detailed_error}
+            else:
+                error_msg = f"Feature extraction failed for {patient_id}: {str(extraction_error)}"
+                return {'patient_id': patient_id, 'error': error_msg}
+            
+    except Exception as e:
+        patient_id = args[0].get('patient_id', 'Unknown') if len(args) > 0 else 'Unknown'
+        error_msg = f"Critical error processing {patient_id}: {str(e)}"
+        return {'patient_id': patient_id, 'error': error_msg}
+
+
+def extract_features_single_patient_sequential(patient_data, params_dict, patient_index, total_patients):
+    """
+    Extract features for a single patient with UI progress updates and enhanced debugging - for sequential processing.
+    """
+    try:
+        patient_id = patient_data['patient_id']
+        image_path = patient_data['image_path']
+        mask_path = patient_data['mask_path']
         
-        # Parallel processing options
-        use_parallel = st.checkbox("Enable Parallel Processing", value=True if cpu_count > 1 else False)
-        if use_parallel:
-            n_jobs = st.slider(
-                "Number of parallel jobs:", 
-                min_value=1, 
-                max_value=min(cpu_count, len(st.session_state.dataset_df)), 
-                value=min(4, cpu_count)
-            )
-        else:
-            n_jobs = 1
+        # Update progress if UI elements are available
+        progress_bar = st.session_state.get('extraction_progress_bar')
+        progress_text = st.session_state.get('extraction_progress_text')
+        status_placeholder = st.session_state.get('extraction_status_placeholder')
         
-        if st.button("🔥 Start Feature Extraction", type="primary"):
-            with st.spinner("Extracting radiomics features... This may take several minutes."):
-                try:
-                    features_df = run_extraction(
-                        st.session_state.dataset_df,
-                        st.session_state.pyradiomics_params,
-                        n_jobs=n_jobs
-                    )
-                    
-                    if not features_df.empty:
-                        st.success(f"✅ Successfully extracted {features_df.shape[1]-1} features from {features_df.shape[0]} patients!")
-                        st.session_state.features_df = features_df
-                        st.session_state.extraction_done = True
-                        
-                        # Display results
-                        st.subheader("📊 Extraction Results")
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Total Features", features_df.shape[1]-1)
-                        with col2:
-                            st.metric("Patients", features_df.shape[0])
-                        with col3:
-                            st.metric("Success Rate", f"{len(features_df)/len(st.session_state.dataset_df)*100:.1f}%")
-                        
-                        st.dataframe(features_df.head())
-                        
-                        # Download extracted features
-                        csv = features_df.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            "📥 Download Extracted Features",
-                            csv,
-                            f"radiomics_features_{st.session_state.get('selected_modality', 'unknown')}.csv",
-                            "text/csv",
-                            key='download-features'
-                        )
-                    else:
-                        st.error("❌ Feature extraction failed. Please check your data and parameters.")
-                        
-                except Exception as e:
-                    st.error(f"❌ Feature extraction failed with error: {str(e)}")
-                    with st.expander("🔍 Error Details"):
-                        st.code(traceback.format_exc())
+        current_progress = (patient_index + 1) / total_patients
+        
+        if progress_bar:
+            progress_bar.progress(current_progress)
+        if progress_text:
+            progress_text.text(f"Extracting features {patient_index + 1}/{total_patients}: {patient_id} ({current_progress*100:.1f}%)")
+        if status_placeholder:
+            status_placeholder.info(f"🔄 Extracting features for {patient_id}...")
+        
+        # Verify files exist
+        if not os.path.exists(image_path) or not os.path.exists(mask_path):
+            error_msg = f"Missing files for {patient_id}: Image={os.path.exists(image_path)}, Mask={os.path.exists(mask_path)}"
+            if status_placeholder:
+                status_placeholder.error(f"❌ {error_msg}")
+            return {'patient_id': patient_id, 'error': error_msg}
+        
+        # Comprehensive mask validation
+        is_valid, validation_msg, mask_info = validate_mask_for_extraction(mask_path, patient_id)
+        
+        if not is_valid:
+            error_msg = f"Mask validation failed for {patient_id}: {validation_msg}"
+            detailed_error = f"{error_msg}\nMask info: {mask_info}"
+            
+            if status_placeholder:
+                status_placeholder.error(f"❌ {error_msg}")
+                # Show detailed debugging info
+                with st.expander(f"🔍 Debug info for {patient_id}"):
+                    st.json(mask_info)
+            
+            return {'patient_id': patient_id, 'error': detailed_error}
+        
+        # Log mask info for successful validation
+        if status_placeholder:
+            status_placeholder.info(f"✅ Mask validated for {patient_id}: {mask_info['nonzero_voxels']} segmented voxels")
+        
+        # Try to preprocess mask if it has unusual values
+        processed_mask_path = mask_path
+        if mask_info['mask_max'] != 1.0 or mask_info['mask_dtype'] != 'uint8':
+            if status_placeholder:
+                status_placeholder.info(f"🔧 Preprocessing mask for {patient_id} (converting to binary uint8)")
+            try:
+                processed_mask_path = preprocess_mask_for_radiomics(mask_path)
+            except Exception as preprocess_error:
+                error_msg = f"Mask preprocessing failed for {patient_id}: {str(preprocess_error)}"
+                if status_placeholder:
+                    status_placeholder.error(f"❌ {error_msg}")
+                return {'patient_id': patient_id, 'error': error_msg}
+        
+        # Initialize extractor
+        extractor = featureextractor.RadiomicsFeatureExtractor()
+        
+        # Configure extractor with parameters
+        for key, value in params_dict.get('setting', {}).items():
+            extractor.settings[key] = value
+        
+        # Enable feature classes
+        extractor.disableAllFeatures()
+        for feature_class in params_dict.get('featureClass', {}):
+            extractor.enableFeatureClassByName(feature_class)
+        
+        # Extract features with the processed mask
+        try:
+            features = extractor.execute(image_path, processed_mask_path)
+            
+            # Convert to flat dictionary
+            feature_dict = {'PatientID': patient_id}
+            for key, value in features.items():
+                if not key.startswith('diagnostics_'):
+                    # Convert numpy types to Python native types
+                    if isinstance(value, (np.integer, np.floating)):
+                        value = value.item()
+                    elif isinstance(value, np.ndarray):
+                        value = value.tolist()
+                    feature_dict[key] = value
+            
+            if status_placeholder:
+                status_placeholder.success(f"✅ Successfully extracted features for {patient_id}")
+            
+            return feature_dict
+            
+        except Exception as extraction_error:
+            # Enhanced error reporting for PyRadiomics errors
+            if "No labels found" in str(extraction_error):
+                detailed_error = f"PyRadiomics 'No labels found' error for {patient_id}. Mask info: {mask_info}"
+                if status_placeholder:
+                    status_placeholder.error(f"❌ No labels found for {patient_id}")
+                    with st.expander(f"🔍 Debug info for {patient_id}"):
+                        st.json(mask_info)
+                        st.write("**Suggestions:**")
+                        st.write("- Check if mask and image have matching dimensions")
+                        st.write("- Verify mask contains positive integer values")
+                        st.write("- Ensure proper spatial alignment")
+                return {'patient_id': patient_id, 'error': detailed_error}
+            else:
+                error_msg = f"Feature extraction failed for {patient_id}: {str(extraction_error)}"
+                if status_placeholder:
+                    status_placeholder.error(f"❌ {error_msg}")
+                return {'patient_id': patient_id, 'error': error_msg}
+            
+    except Exception as e:
+        error_msg = f"Critical error processing {patient_data.get('patient_id', 'Unknown')}: {str(e)}"
+        if status_placeholder:
+            status_placeholder.error(f"❌ {error_msg}")
+        return {'patient_id': patient_data.get('patient_id', 'Unknown'), 'error': error_msg}
 
 
 def run_extraction(dataset_df, params, n_jobs=1):
     """
-    Run radiomics feature extraction on a dataset.
-    
-    Args:
-        dataset_df (pd.DataFrame): DataFrame containing patient data with image_path and mask_path
-        params (dict): PyRadiomics parameter configuration
-        n_jobs (int): Number of parallel jobs to run (default: 1)
-    
-    Returns:
-        pd.DataFrame: DataFrame containing extracted features
+    Runs feature extraction on the dataset with progress tracking.
     """
+    if dataset_df.empty:
+        st.error("No data provided for feature extraction.")
+        return pd.DataFrame()
     
-    print(f"Starting feature extraction for {len(dataset_df)} patients with {n_jobs} parallel jobs...")
-    print(f"Available columns in dataset: {list(dataset_df.columns)}")
+    # Get UI elements from session state
+    progress_bar = st.session_state.get('extraction_progress_bar')
+    progress_text = st.session_state.get('extraction_progress_text')
+    status_placeholder = st.session_state.get('extraction_status_placeholder')
     
-    # Validate input DataFrame with flexible column naming
-    # Try to find the patient ID column with different possible names
-    patient_id_column = None
-    possible_patient_id_names = ['PatientID', 'Patient_ID', 'patient_id', 'ID', 'Subject', 'subject_id', 'SubjectID']
+    total_patients = len(dataset_df)
+    successful_extractions = []
+    failed_extractions = []
     
-    for col_name in possible_patient_id_names:
-        if col_name in dataset_df.columns:
-            patient_id_column = col_name
-            break
-    
-    if patient_id_column is None:
-        # If no patient ID column found, create one using the index
-        print("Warning: No patient ID column found. Creating PatientID from index.")
-        dataset_df = dataset_df.copy()
-        dataset_df['PatientID'] = dataset_df.index.astype(str)
-        patient_id_column = 'PatientID'
-    
-    # Check for required path columns
-    required_path_columns = ['image_path', 'mask_path']
-    missing_columns = [col for col in required_path_columns if col not in dataset_df.columns]
-    if missing_columns:
-        raise ValueError(f"Missing required columns: {missing_columns}. Available columns: {list(dataset_df.columns)}")
-    
-    print(f"Using '{patient_id_column}' as patient ID column")
-    
-    feature_list = []
-    failed_patients = []
-    
-    if n_jobs == 1:
-        # Sequential processing
-        print("Using sequential processing...")
-        extractor = featureextractor.RadiomicsFeatureExtractor(params)
-        
-        for idx, row in dataset_df.iterrows():
-            try:
-                patient_id = row[patient_id_column]
-                image_path = row['image_path']
-                mask_path = row['mask_path']
+    try:
+        if n_jobs == 1:
+            # Sequential processing with detailed progress updates
+            if status_placeholder:
+                status_placeholder.info(f"🔄 Starting sequential feature extraction for {total_patients} patients...")
+            
+            for i, (_, patient_data) in enumerate(dataset_df.iterrows()):
+                result = extract_features_single_patient_sequential(
+                    patient_data.to_dict(), 
+                    params, 
+                    i, 
+                    total_patients
+                )
                 
-                print(f"Processing patient {patient_id} ({idx+1}/{len(dataset_df)})")
-                print(f"  Image path: {image_path}")
-                print(f"  Mask path: {mask_path}")
-                
-                # Check if files exist
-                import os
-                if not os.path.exists(image_path):
-                    raise FileNotFoundError(f"Image file not found: {image_path}")
-                if not os.path.exists(mask_path):
-                    raise FileNotFoundError(f"Mask file not found: {mask_path}")
-                
-                print(f"  Files exist - extracting features...")
-                
-                # Extract features
-                features = extractor.execute(image_path, mask_path)
-                
-                print(f"  Extracted {len(features)} raw features")
-                
-                # Convert to regular dictionary and add patient ID
-                feature_dict = {'PatientID': patient_id}
-                feature_count = 0
-                for key, value in features.items():
-                    if isinstance(value, (int, float, np.integer, np.floating)):
-                        feature_dict[key] = float(value)
-                        feature_count += 1
-                    else:
-                        feature_dict[key] = str(value)
-                
-                print(f"  Converted {feature_count} numeric features")
-                
-                feature_list.append(feature_dict)
-                print(f"✅ Successfully processed patient {patient_id} - Total features in dict: {len(feature_dict)}")
-                print(f"  Current feature_list length: {len(feature_list)}")
-                
-            except Exception as e:
-                patient_id = row[patient_id_column] if patient_id_column in row else f"Unknown_{idx}"
-                print(f"❌ Error extracting features for patient {patient_id}: {str(e)}")
-                print(f"  Error type: {type(e).__name__}")
-                import traceback
-                print(f"  Full traceback: {traceback.format_exc()}")
-                failed_patients.append(patient_id)
-                continue
-    
-    else:
-        # Parallel processing
-        print(f"Using parallel processing with {n_jobs} workers...")
-        print(f"Total patients to process: {len(dataset_df)}")
-        
-        # Prepare arguments for parallel processing
-        args_list = []
-        for idx, row in dataset_df.iterrows():
-            row_dict = row.to_dict()
-            # Ensure PatientID is in the dictionary for parallel processing
-            if 'PatientID' not in row_dict:
-                row_dict['PatientID'] = row_dict[patient_id_column]
-            args_list.append((row_dict, params))
-        
-        print(f"Prepared {len(args_list)} jobs for parallel processing")
-        
-        try:
+                if 'error' in result:
+                    failed_extractions.append(result)
+                else:
+                    successful_extractions.append(result)
+        else:
+            # Parallel processing with basic progress tracking
+            if status_placeholder:
+                status_placeholder.info(f"🔄 Starting parallel extraction with {n_jobs} workers for {total_patients} patients...")
+            
+            # Prepare arguments for parallel processing
+            args_list = []
+            for i, (_, patient_data) in enumerate(dataset_df.iterrows()):
+                args_list.append((patient_data.to_dict(), params, i, total_patients))
+            
             with ProcessPoolExecutor(max_workers=n_jobs) as executor:
                 # Submit all jobs
                 future_to_patient = {}
-                for i, args in enumerate(args_list):
+                for args in args_list:
                     future = executor.submit(extract_features_single_patient, args)
-                    future_to_patient[future] = args[0]['PatientID']
-                    print(f"Submitted job {i+1}/{len(args_list)} for patient {args[0]['PatientID']}")
+                    future_to_patient[future] = args[0]['patient_id']  # patient_id is in patient_data
                 
-                print(f"All {len(future_to_patient)} jobs submitted. Waiting for results...")
-                
-                # Collect results
+                # Collect results as they complete
                 completed_count = 0
                 for future in as_completed(future_to_patient):
-                    patient_id = future_to_patient[future]
                     completed_count += 1
+                    current_progress = completed_count / total_patients
+                    
+                    if progress_bar:
+                        progress_bar.progress(current_progress)
+                    if progress_text:
+                        progress_text.text(f"Completed {completed_count}/{total_patients} patients ({current_progress*100:.1f}%)")
+                    if status_placeholder:
+                        status_placeholder.info(f"🔄 Processed {completed_count}/{total_patients} patients...")
+                    
                     try:
-                        success, returned_patient_id, result = future.result()
-                        if success:
-                            feature_list.append(result)
-                            print(f"✅ Completed patient {returned_patient_id} ({completed_count}/{len(future_to_patient)})")
+                        result = future.result()
+                        if 'error' in result:
+                            failed_extractions.append(result)
                         else:
-                            failed_patients.append(returned_patient_id)
-                            print(f"❌ Failed patient {returned_patient_id}: {result}")
+                            successful_extractions.append(result)
                     except Exception as e:
-                        failed_patients.append(patient_id)
-                        print(f"❌ Exception for patient {patient_id}: {str(e)}")
-                        
-        except Exception as e:
-            print(f"❌ Error in parallel processing: {str(e)}")
-            print("Falling back to sequential processing...")
-            # Fallback to sequential processing
-            return run_extraction(dataset_df, params, n_jobs=1)
-    
-    # Final results summary
-    print(f"\n=== EXTRACTION SUMMARY ===")
-    print(f"Total patients in dataset: {len(dataset_df)}")
-    print(f"Successfully processed: {len(feature_list)}")
-    print(f"Failed: {len(failed_patients)}")
-    
-    if failed_patients:
-        print(f"Failed patients: {failed_patients}")
-    
-    if not feature_list:
-        print("❌ Error: No successful feature extractions")
+                        patient_id = future_to_patient[future]
+                        failed_extractions.append({
+                            'patient_id': patient_id, 
+                            'error': f"Parallel processing error: {str(e)}"
+                        })
+        
+        # Final progress update
+        if progress_bar:
+            progress_bar.progress(1.0)
+        if progress_text:
+            progress_text.text(f"Extraction complete! {len(successful_extractions)}/{total_patients} patients processed successfully")
+        
+        # Create results summary
+        if successful_extractions:
+            features_df = pd.DataFrame(successful_extractions)
+            
+            if status_placeholder:
+                if failed_extractions:
+                    status_placeholder.warning(f"⚠️ Extraction complete with some failures: {len(successful_extractions)} successful, {len(failed_extractions)} failed")
+                else:
+                    status_placeholder.success(f"🎉 Feature extraction complete! All {len(successful_extractions)} patients processed successfully")
+            
+            # Store extraction summary in session state
+            st.session_state['extraction_summary'] = {
+                'total_patients': total_patients,
+                'successful_extractions': len(successful_extractions),
+                'failed_extractions': failed_extractions,
+                'total_features': len(features_df.columns) - 1  # Exclude PatientID
+            }
+            
+            return features_df
+        else:
+            if status_placeholder:
+                status_placeholder.error(f"❌ Feature extraction failed for all patients")
+            
+            # Store extraction summary even for complete failure
+            st.session_state['extraction_summary'] = {
+                'total_patients': total_patients,
+                'successful_extractions': 0,
+                'failed_extractions': failed_extractions,
+                'total_features': 0
+            }
+            
+            return pd.DataFrame()
+            
+    except Exception as e:
+        if status_placeholder:
+            status_placeholder.error(f"❌ Critical error during feature extraction: {str(e)}")
+        st.error(f"Feature extraction failed with error: {str(e)}")
+        with st.expander("🔍 Error Details"):
+            st.code(traceback.format_exc())
+        
+        # Store extraction summary for critical failure
+        st.session_state['extraction_summary'] = {
+            'total_patients': total_patients,
+            'successful_extractions': len(successful_extractions),
+            'failed_extractions': failed_extractions + [{'patient_id': 'System', 'error': str(e)}],
+            'total_features': 0
+        }
+        
         return pd.DataFrame()
+
+
+def validate_extraction_parameters(params):
+    """
+    Validates PyRadiomics parameters before extraction.
+    """
+    validation_errors = []
     
-    # Convert to DataFrame
-    print("Converting results to DataFrame...")
-    features_df = pd.DataFrame(feature_list)
+    if not isinstance(params, dict):
+        validation_errors.append("Parameters must be a dictionary")
+        return validation_errors
     
-    # Sort columns: PatientID first, then alphabetically
-    columns = ['PatientID'] + sorted([col for col in features_df.columns if col != 'PatientID'])
-    features_df = features_df[columns]
+    # Check required sections
+    if 'setting' not in params:
+        validation_errors.append("Missing 'setting' section in parameters")
     
-    print(f"✅ Successfully extracted {features_df.shape[1]-1} features from {features_df.shape[0]} patients")
-    print(f"Final DataFrame shape: {features_df.shape}")
+    if 'featureClass' not in params:
+        validation_errors.append("Missing 'featureClass' section in parameters")
     
-    return features_df
+    # Check if at least one feature class is enabled
+    if 'featureClass' in params:
+        if not params['featureClass']:
+            validation_errors.append("No feature classes enabled")
+    
+    # Validate specific settings
+    if 'setting' in params:
+        settings = params['setting']
+        
+        # Validate bin width
+        if 'binWidth' in settings:
+            try:
+                bin_width = float(settings['binWidth'])
+                if bin_width <= 0:
+                    validation_errors.append("Bin width must be positive")
+            except (ValueError, TypeError):
+                validation_errors.append("Bin width must be a number")
+        
+        # Validate interpolator
+        valid_interpolators = ['sitkBSpline', 'sitkLinear', 'sitkNearestNeighbor']
+        if 'interpolator' in settings:
+            if settings['interpolator'] not in valid_interpolators:
+                validation_errors.append(f"Interpolator must be one of: {valid_interpolators}")
+    
+    return validation_errors
+
+
+def get_feature_extraction_info():
+    """
+    Returns information about the current PyRadiomics installation and available features.
+    """
+    try:
+        info = {
+            'radiomics_version': radiomics.__version__,
+            'available_feature_classes': [
+                'firstorder', 'shape', 'glcm', 'glrlm', 
+                'glszm', 'ngtdm', 'gldm'
+            ],
+            'available_interpolators': [
+                'sitkBSpline', 'sitkLinear', 'sitkNearestNeighbor'
+            ],
+            'default_settings': {
+                'binWidth': 25,
+                'interpolator': 'sitkBSpline',
+                'padDistance': 5,
+                'geometryTolerance': 0.0001
+            }
+        }
+        return info
+    except Exception as e:
+        return {'error': str(e)}
