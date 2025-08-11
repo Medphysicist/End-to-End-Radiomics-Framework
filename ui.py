@@ -1,15 +1,11 @@
-# ui.py
 """
 This module contains all the functions for building the Streamlit user interface.
 It defines the content for each tab and the sidebar.
 """
 
-# These two imports are essential for displaying the error message itself.
 import streamlit as st
 import traceback
 
-# This single try-except block will attempt to import everything else.
-# If any import fails, it will now show the detailed error.
 try:
     import pandas as pd
     import numpy as np
@@ -32,18 +28,15 @@ try:
     from utils import check_system_resources, categorize_contours, validate_uploaded_files
 
 except ImportError as e:
-    # This is the new, improved error reporting block.
     st.header("💥 Application Error")
     st.error("A critical module failed to import. The application cannot start.")
     st.error(f"The specific error is: **{e}**")
     st.code(traceback.format_exc(), language='text')
     st.stop()
 
-
-# --- ALL OF YOUR UI FUNCTIONS START HERE, UNCHANGED ---
+# --- UI FUNCTIONS ---
 
 def enhanced_data_input_section():
-    """Creates the UI for allowing users to select their data source."""
     st.header("Step 1.1: Select Your DICOM Data Source")
 
     input_method = st.radio(
@@ -101,8 +94,6 @@ def enhanced_data_input_section():
 
 
 def build_tab1_data_upload():
-    """Builds the UI for the first tab: Data Upload & Pre-processing."""
-    
     uploaded_files, selected_path = enhanced_data_input_section()
     
     process_button_label = ""
@@ -129,7 +120,6 @@ def build_tab1_data_upload():
         st.divider()
         st.header("Step 1.2: Select Imaging Modality and Scan for Contours")
         
-        # Modality selection
         col1, col2 = st.columns(2)
         with col1:
             modality_options = ['CT', 'MR', 'PT']
@@ -160,12 +150,10 @@ def build_tab1_data_upload():
         if st.session_state.get('all_contours'):
             st.success(f"🎯 Scan complete! Found {len(st.session_state.all_contours)} unique contours for {st.session_state.selected_modality} imaging.")
             
-            # Show scan results summary
             with st.expander("📋 Scan Results Summary"):
                 success_count = sum(1 for status in st.session_state.patient_status.values() if status['status'] == 'success')
                 total_patients = len(st.session_state.patient_status)
                 st.metric("Successfully processed patients", f"{success_count}/{total_patients}")
-                
                 if success_count < total_patients:
                     failed_patients = [pid for pid, status in st.session_state.patient_status.items() if status['status'] == 'error']
                     st.warning(f"Failed to process: {', '.join(failed_patients)}")
@@ -176,8 +164,6 @@ def build_tab1_data_upload():
 
             if selected_roi:
                 st.info(f"You selected: **{selected_roi}** for **{st.session_state.selected_modality}** imaging")
-                
-                # Show which patients have this ROI
                 patients_with_roi = [pid for pid, contours in st.session_state.patient_contour_data.items() 
                                    if any(selected_roi.lower() in contour.lower() for contour in contours)]
                 st.info(f"📊 This ROI is available in {len(patients_with_roi)} patients: {', '.join(patients_with_roi)}")
@@ -185,30 +171,65 @@ def build_tab1_data_upload():
                 st.divider()
                 st.header("Step 1.3: Generate NIfTI Files")
                 if st.button("🚀 Start Pre-processing & Generate NIfTI", type="primary"):
-                    with st.spinner("Generating NIfTI files... This may take a while."):
-                        result_df = preprocess_uploaded_data(
-                            st.session_state.uploaded_data_path, 
-                            selected_roi, 
-                            st.session_state.selected_modality
-                        )
+                    progress_container = st.container()
+                    status_container = st.container()
+                    with progress_container:
+                        progress_bar = st.progress(0)
+                        progress_text = st.empty()
+                    with status_container:
+                        status_placeholder = st.empty()
+                    st.session_state['ui_progress_bar'] = progress_bar
+                    st.session_state['ui_progress_text'] = progress_text
+                    st.session_state['ui_status_placeholder'] = status_placeholder
+                    result_df, processing_summary = preprocess_uploaded_data(
+                        st.session_state.uploaded_data_path, 
+                        selected_roi, 
+                        st.session_state.selected_modality
+                    )
+                    st.session_state['processing_summary'] = processing_summary
                     if not result_df.empty:
                         st.success(f"✅ Successfully pre-processed {len(result_df)} patients with {st.session_state.selected_modality} imaging!")
                         st.session_state.dataset_df = result_df
                         st.session_state.preprocessing_done = True
-                        
-                        # Enhanced results display
                         st.subheader("📊 Pre-processing Results")
-                        col1, col2, col3 = st.columns(3)
+                        col1, col2, col3, col4 = st.columns(4)
+                        processing_summary = st.session_state.get('processing_summary', {})
                         with col1:
-                            st.metric("Patients Processed", len(result_df))
+                            st.metric("Total Patients", processing_summary.get('total_patients', len(result_df)))
                         with col2:
-                            st.metric("Imaging Modality", st.session_state.selected_modality)
+                            st.metric("Successful", len(result_df), delta=f"+{len(result_df)}")
                         with col3:
-                            st.metric("Target ROI", selected_roi)
-                        
-                        st.dataframe(result_df)
-                        
-                        # Download option for the dataset summary
+                            failed_count = processing_summary.get('total_patients', len(result_df)) - len(result_df)
+                            st.metric("Failed", failed_count, delta=f"-{failed_count}" if failed_count > 0 else "0")
+                        with col4:
+                            success_rate = (len(result_df) / processing_summary.get('total_patients', len(result_df))) * 100 if processing_summary.get('total_patients', 0) > 0 else 100
+                            st.metric("Success Rate", f"{success_rate:.1f}%")
+                        if processing_summary.get('failed_patients'):
+                            st.subheader("⚠️ Processing Issues")
+                            success_tab, failure_tab = st.tabs(["✅ Successful Patients", "❌ Failed Patients"])
+                            with success_tab:
+                                if not result_df.empty:
+                                    st.dataframe(result_df)
+                            with failure_tab:
+                                if processing_summary.get('failed_patients'):
+                                    failure_data = []
+                                    for patient_id, details in processing_summary['failed_patients'].items():
+                                        failure_data.append({
+                                            'Patient ID': patient_id,
+                                            'Failure Reason': details.get('reason', 'Unknown error'),
+                                            'Details': details.get('details', 'No additional details')
+                                        })
+                                    failure_df = pd.DataFrame(failure_data)
+                                    st.dataframe(failure_df, use_container_width=True)
+                                    st.subheader("📈 Failure Analysis")
+                                    failure_reasons = {}
+                                    for details in processing_summary['failed_patients'].values():
+                                        reason = details.get('reason', 'Unknown error')
+                                        failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+                                    for reason, count in failure_reasons.items():
+                                        st.write(f"• **{reason}**: {count} patient(s)")
+                        else:
+                            st.dataframe(result_df)
                         csv = result_df.to_csv(index=False).encode('utf-8')
                         st.download_button(
                             "📥 Download Dataset Summary",
@@ -219,23 +240,23 @@ def build_tab1_data_upload():
                         )
                     else:
                         st.error("❌ Pre-processing failed. Please check your data and try again.")
+                        if st.session_state.get('processing_summary', {}).get('failed_patients'):
+                            with st.expander("🔍 View Error Details"):
+                                processing_summary = st.session_state['processing_summary']
+                                for patient_id, details in processing_summary['failed_patients'].items():
+                                    st.error(f"**{patient_id}**: {details.get('reason', 'Unknown error')}")
+                                    if details.get('details'):
+                                        st.code(details['details'], language='text')
 
 
 def build_tab2_feature_extraction():
-    """Builds the UI for the second tab: Feature Extraction."""
-    
-    # Check if preprocessing is done
     if not st.session_state.get('preprocessing_done', False):
         st.warning("⚠️ Please complete the data upload and pre-processing steps first.")
         return
     
     st.header("Step 2: Radiomics Feature Extraction")
-    
-    # PyRadiomics configuration
     st.subheader("🔧 PyRadiomics Configuration")
-    
     col1, col2 = st.columns(2)
-    
     with col1:
         st.write("**Feature Classes to Extract:**")
         feature_classes = {}
@@ -246,28 +267,22 @@ def build_tab2_feature_extraction():
         feature_classes['glszm'] = st.checkbox("GLSZM Features", value=True)
         feature_classes['ngtdm'] = st.checkbox("NGTDM Features", value=True)
         feature_classes['gldm'] = st.checkbox("GLDM Features", value=True)
-    
     with col2:
         st.write("**Preprocessing Settings:**")
         normalize_image = st.checkbox("Normalize Image", value=True)
         resample_pixel_spacing = st.checkbox("Resample Pixel Spacing", value=False)
         bin_width = st.number_input("Bin Width", min_value=1, max_value=100, value=25)
-        
         if resample_pixel_spacing:
             pixel_spacing = st.number_input("Pixel Spacing (mm)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
         else:
             pixel_spacing = None
-    
-    # Advanced settings
     with st.expander("⚙️ Advanced Settings"):
         interpolator = st.selectbox(
             "Interpolator",
             ["sitkBSpline", "sitkLinear", "sitkNearestNeighbor"],
             index=0
         )
-        
         pad_distance = st.number_input("Pad Distance", min_value=0, max_value=20, value=5)
-        
         geometryTolerance = st.number_input(
             "Geometry Tolerance", 
             min_value=0.0, 
@@ -275,12 +290,9 @@ def build_tab2_feature_extraction():
             value=0.0001, 
             format="%.6f"
         )
-    
-    # Generate parameter file
     if st.button("🔄 Generate PyRadiomics Parameters", type="secondary"):
         with st.spinner("Generating parameter configuration..."):
             try:
-                # Try the original function call first
                 params = generate_pyradiomics_params(
                     feature_classes=feature_classes,
                     normalize_image=normalize_image,
@@ -292,10 +304,7 @@ def build_tab2_feature_extraction():
                     geometryTolerance=geometryTolerance
                 )
             except TypeError as e:
-                # If the function doesn't accept these parameters, create params manually
                 st.warning(f"Parameter generation function needs updating. Creating parameters manually...")
-                
-                # Create parameters manually
                 params = {
                     'setting': {
                         'binWidth': bin_width,
@@ -303,40 +312,25 @@ def build_tab2_feature_extraction():
                         'padDistance': pad_distance,
                         'geometryTolerance': geometryTolerance
                     },
-                    'imageType': {}
+                    'imageType': {},
+                    'featureClass': {}
                 }
-                
-                # Add normalization if requested
                 if normalize_image:
                     params['setting']['normalize'] = True
                     params['setting']['normalizeScale'] = 1
-                
-                # Add resampling if requested
                 if resample_pixel_spacing and pixel_spacing:
                     params['setting']['resampledPixelSpacing'] = [pixel_spacing, pixel_spacing, pixel_spacing]
-                
-                # Add feature classes
-                params['featureClass'] = {}
                 for feature_class, enabled in feature_classes.items():
                     if enabled:
                         params['featureClass'][feature_class] = []
-                
-                # Add original image
                 params['imageType']['Original'] = {}
-            
             st.session_state.pyradiomics_params = params
             st.success("✅ PyRadiomics parameters generated successfully!")
-            
-            # Display the parameters
             with st.expander("📋 Generated Parameters"):
                 st.code(yaml.dump(params, default_flow_style=False), language='yaml')
-    
-    # Feature extraction
     if st.session_state.get('pyradiomics_params'):
         st.divider()
         st.subheader("🚀 Run Feature Extraction")
-        
-        # Resource check with error handling
         try:
             resource_info = check_system_resources()
             col1, col2, col3 = st.columns(3)
@@ -352,8 +346,6 @@ def build_tab2_feature_extraction():
             st.warning(f"Could not get system resources: {str(e)}")
             cpu_count = 1
             ram_gb = 0
-        
-        # Parallel processing options
         use_parallel = st.checkbox("Enable Parallel Processing", value=True if cpu_count > 1 else False)
         if use_parallel:
             n_jobs = st.slider(
@@ -364,121 +356,114 @@ def build_tab2_feature_extraction():
             )
         else:
             n_jobs = 1
-        
         if st.button("🔥 Start Feature Extraction", type="primary"):
-            with st.spinner("Extracting radiomics features... This may take several minutes."):
-                try:
-                    features_df = run_extraction(
-                        st.session_state.dataset_df,
-                        st.session_state.pyradiomics_params,
-                        n_jobs=n_jobs
-                    )
-                    
-                    if not features_df.empty:
-                        st.success(f"✅ Successfully extracted {features_df.shape[1]-1} features from {features_df.shape[0]} patients!")
-                        st.session_state.features_df = features_df
-                        st.session_state.extraction_done = True
-                        
-                        # Display results
-                        st.subheader("📊 Extraction Results")
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Total Features", features_df.shape[1]-1)
-                        with col2:
-                            st.metric("Patients", features_df.shape[0])
-                        with col3:
-                            st.metric("Success Rate", "100%")
-                        
-                        st.dataframe(features_df.head())
-                        
-                        # Download extracted features
-                        csv = features_df.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            "📥 Download Extracted Features",
-                            csv,
-                            f"radiomics_features_{st.session_state.selected_modality}.csv",
-                            "text/csv",
-                            key='download-features'
-                        )
-                    else:
-                        st.error("❌ Feature extraction failed. Please check your data and parameters.")
-                        
-                except Exception as e:
-                    st.error(f"❌ Feature extraction failed with error: {str(e)}")
-                    with st.expander("🔍 Error Details"):
-                        st.code(traceback.format_exc())
+            extraction_progress_container = st.container()
+            extraction_status_container = st.container()
+            with extraction_progress_container:
+                extraction_progress_bar = st.progress(0)
+                extraction_progress_text = st.empty()
+            with extraction_status_container:
+                extraction_status_placeholder = st.empty()
+            st.session_state['extraction_progress_bar'] = extraction_progress_bar
+            st.session_state['extraction_progress_text'] = extraction_progress_text
+            st.session_state['extraction_status_placeholder'] = extraction_status_placeholder
+            features_df = run_extraction(
+                st.session_state.dataset_df,
+                st.session_state.pyradiomics_params,
+                n_jobs=n_jobs
+            )
+            if not features_df.empty:
+                st.success(f"✅ Successfully extracted {features_df.shape[1]-1} features from {features_df.shape[0]} patients!")
+                st.session_state.features_df = features_df
+                st.session_state.extraction_done = True
+                st.subheader("📊 Extraction Results")
+                extraction_summary = st.session_state.get('extraction_summary', {})
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Total Features", features_df.shape[1]-1)
+                with col2:
+                    st.metric("Patients Processed", len(features_df))
+                with col3:
+                    total_patients = extraction_summary.get('total_patients', len(features_df))
+                    success_rate = (len(features_df) / total_patients) * 100 if total_patients > 0 else 100
+                    st.metric("Success Rate", f"{success_rate:.1f}%")
+                with col4:
+                    failed_count = extraction_summary.get('total_patients', len(features_df)) - len(features_df)
+                    st.metric("Failed", failed_count if failed_count > 0 else 0)
+                if extraction_summary.get('failed_extractions'):
+                    with st.expander("⚠️ View Extraction Failures"):
+                        failed_extractions = extraction_summary['failed_extractions']
+                        for failure in failed_extractions:
+                            st.error(f"**{failure['patient_id']}**: {failure['error']}")
+                st.dataframe(features_df.head())
+                csv = features_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    "📥 Download Extracted Features",
+                    csv,
+                    f"radiomics_features_{st.session_state.selected_modality}.csv",
+                    "text/csv",
+                    key='download-features'
+                )
+            else:
+                st.error("❌ Feature extraction failed. Please check your data and parameters.")
+                if st.session_state.get('extraction_summary', {}).get('failed_extractions'):
+                    with st.expander("🔍 View Error Details"):
+                        extraction_summary = st.session_state['extraction_summary']
+                        for failure in extraction_summary['failed_extractions']:
+                            st.error(f"**{failure['patient_id']}**: {failure['error']}")
+
+# TAB 3 and SIDEBAR - from your previous version
 
 def build_tab3_analysis():
     """Builds the UI for the third tab: Statistical Analysis."""
-    
-    # Check if extraction is done
     if not st.session_state.get('extraction_done', False):
         st.warning("⚠️ Please complete the feature extraction step first.")
         return
-    
     st.header("Step 3: Statistical Analysis & Feature Selection")
-    
-    # Load outcome data
     st.subheader("📊 Load Outcome Data")
-    
     outcome_method = st.radio(
         "How would you like to provide outcome data?",
         ["📤 Upload CSV File", "✏️ Manual Entry"],
         horizontal=True
     )
-    
     outcome_df = None
-    
     if outcome_method == "📤 Upload CSV File":
         uploaded_outcome = st.file_uploader(
             "Upload outcome data (CSV format)",
             type=['csv'],
             help="CSV should contain 'PatientID' and outcome columns"
         )
-        
         if uploaded_outcome:
             try:
                 outcome_df = pd.read_csv(uploaded_outcome)
                 st.success(f"✅ Loaded outcome data with {len(outcome_df)} patients")
                 st.dataframe(outcome_df.head())
-                
-                # Validate PatientID column
                 if 'PatientID' not in outcome_df.columns:
                     st.error("❌ Outcome data must contain a 'PatientID' column")
                     outcome_df = None
                 else:
-                    # Check for matching patients
                     feature_patients = set(st.session_state.features_df['PatientID'].values)
                     outcome_patients = set(outcome_df['PatientID'].values)
                     common_patients = feature_patients.intersection(outcome_patients)
-                    
                     if len(common_patients) == 0:
                         st.error("❌ No matching patients found between features and outcome data")
                         outcome_df = None
                     else:
                         st.info(f"📊 Found {len(common_patients)} patients with both features and outcome data")
-                        
             except Exception as e:
                 st.error(f"❌ Error loading outcome data: {str(e)}")
-    
     elif outcome_method == "✏️ Manual Entry":
         st.write("**Manual Outcome Entry:**")
         patients = st.session_state.features_df['PatientID'].tolist()
-        
-        # Create a simple form for binary outcomes
         outcome_type = st.selectbox(
             "Select outcome type:",
             ["Binary (0/1)", "Continuous", "Categorical"]
         )
-        
         if outcome_type == "Binary (0/1)":
             st.write("Enter binary outcomes (0 or 1) for each patient:")
             outcomes = {}
-            
-            # Create columns for better layout
             n_cols = 3
             cols = st.columns(n_cols)
-            
             for i, patient in enumerate(patients):
                 with cols[i % n_cols]:
                     outcomes[patient] = st.selectbox(
@@ -486,7 +471,6 @@ def build_tab3_analysis():
                         [0, 1],
                         key=f"outcome_{patient}"
                     )
-            
             if st.button("✅ Create Outcome Dataset"):
                 outcome_df = pd.DataFrame({
                     'PatientID': patients,
@@ -494,37 +478,24 @@ def build_tab3_analysis():
                 })
                 st.success("✅ Manual outcome data created!")
                 st.dataframe(outcome_df)
-    
-    # Analysis section
     if outcome_df is not None:
         st.session_state.outcome_df = outcome_df
-        
         st.divider()
         st.subheader("🔬 Statistical Analysis")
-        
-        # Merge features and outcomes
         merged_df = pd.merge(st.session_state.features_df, outcome_df, on='PatientID')
-        
-        # Select outcome column
         outcome_columns = [col for col in outcome_df.columns if col != 'PatientID']
         selected_outcome = st.selectbox(
             "Select outcome variable for analysis:",
             outcome_columns
         )
-        
         if selected_outcome:
             st.session_state.selected_outcome = selected_outcome
-            
-            # Analysis options
             analysis_type = st.selectbox(
                 "Select analysis type:",
                 ["Univariate Analysis", "LASSO Feature Selection", "Correlation Analysis"]
             )
-            
             if analysis_type == "Univariate Analysis":
                 st.subheader("📈 Univariate Analysis")
-                
-                # Configuration
                 col1, col2 = st.columns(2)
                 with col1:
                     p_threshold = st.number_input(
@@ -539,7 +510,6 @@ def build_tab3_analysis():
                         "Statistical test:",
                         ["Auto-detect", "T-test", "Mann-Whitney U", "Pearson Correlation", "Spearman Correlation"]
                     )
-                
                 if st.button("🔄 Run Univariate Analysis"):
                     with st.spinner("Running univariate analysis..."):
                         results_df = run_univariate_analysis(
@@ -548,15 +518,10 @@ def build_tab3_analysis():
                             p_threshold=p_threshold,
                             test_type=test_type
                         )
-                        
                         if not results_df.empty:
                             st.success(f"✅ Found {len(results_df)} significant features (p < {p_threshold})")
                             st.session_state.univariate_results = results_df
-                            
-                            # Display results
                             st.dataframe(results_df)
-                            
-                            # Download results
                             csv = results_df.to_csv(index=False).encode('utf-8')
                             st.download_button(
                                 "📥 Download Univariate Results",
@@ -567,11 +532,8 @@ def build_tab3_analysis():
                             )
                         else:
                             st.warning("⚠️ No significant features found with current threshold")
-            
             elif analysis_type == "LASSO Feature Selection":
                 st.subheader("🎯 LASSO Feature Selection")
-                
-                # Configuration
                 col1, col2 = st.columns(2)
                 with col1:
                     alpha = st.number_input(
@@ -588,14 +550,12 @@ def build_tab3_analysis():
                         max_value=10,
                         value=5
                     )
-                
                 max_features = st.number_input(
                     "Maximum features to select:",
                     min_value=1,
                     max_value=50,
                     value=10
                 )
-                
                 if st.button("🔄 Run LASSO Selection"):
                     with st.spinner("Running LASSO feature selection..."):
                         selected_features, lasso_results = run_lasso_selection(
@@ -605,18 +565,13 @@ def build_tab3_analysis():
                             cv_folds=cv_folds,
                             max_features=max_features
                         )
-                        
                         if selected_features:
                             st.success(f"✅ LASSO selected {len(selected_features)} features")
                             st.session_state.lasso_features = selected_features
                             st.session_state.lasso_results = lasso_results
-                            
-                            # Display selected features
                             st.write("**Selected Features:**")
                             for i, feature in enumerate(selected_features, 1):
                                 st.write(f"{i}. {feature}")
-                            
-                            # Display model performance
                             if lasso_results:
                                 st.subheader("📊 Model Performance")
                                 col1, col2, col3 = st.columns(3)
@@ -628,11 +583,8 @@ def build_tab3_analysis():
                                     st.metric("Alpha Used", f"{lasso_results.get('alpha', alpha):.3f}")
                         else:
                             st.warning("⚠️ LASSO did not select any features with current parameters")
-            
             elif analysis_type == "Correlation Analysis":
                 st.subheader("🔗 Correlation Analysis")
-                
-                # Configuration
                 col1, col2 = st.columns(2)
                 with col1:
                     correlation_method = st.selectbox(
@@ -647,26 +599,21 @@ def build_tab3_analysis():
                         value=0.5,
                         step=0.1
                     )
-                
                 if st.button("🔄 Generate Correlation Heatmap"):
                     with st.spinner("Generating correlation analysis..."):
-                        # Use selected features if available, otherwise use top features
                         if st.session_state.get('lasso_features'):
                             features_to_analyze = st.session_state.lasso_features
                         elif st.session_state.get('univariate_results') is not None:
                             features_to_analyze = st.session_state.univariate_results['Feature'].head(20).tolist()
                         else:
-                            # Use first 20 features
                             feature_cols = [col for col in merged_df.columns if col not in ['PatientID', selected_outcome]]
                             features_to_analyze = feature_cols[:20]
-                        
                         heatmap_fig = generate_correlation_heatmap(
                             merged_df,
                             features_to_analyze,
                             method=correlation_method,
                             min_correlation=min_correlation
                         )
-                        
                         if heatmap_fig:
                             st.plotly_chart(heatmap_fig, use_container_width=True)
                             st.session_state.correlation_heatmap = heatmap_fig
@@ -675,36 +622,26 @@ def build_tab3_analysis():
 
 
 def build_sidebar():
-    """Builds the sidebar with system information and navigation."""
     st.sidebar.title("🔬 RadiomicsGUI")
     st.sidebar.write("Advanced Radiomics Analysis Platform")
-    
-    # System information with error handling
     st.sidebar.subheader("💻 System Information")
     try:
         resource_info = check_system_resources()
-        
-        # Handle different possible key names and structures
         if isinstance(resource_info, dict):
-            # Try different possible key names for RAM
             ram_gb = None
             for key in ['available_ram_gb', 'ram_gb', 'memory_gb', 'available_memory_gb']:
                 if key in resource_info:
                     ram_gb = resource_info[key]
                     break
-            
             if ram_gb is not None:
                 st.sidebar.metric("Available RAM", f"{ram_gb:.1f} GB")
             else:
                 st.sidebar.metric("Available RAM", "N/A")
-            
-            # Try different possible key names for CPU
             cpu_count = None
             for key in ['cpu_count', 'cpus', 'cpu_cores', 'cores']:
                 if key in resource_info:
                     cpu_count = resource_info[key]
                     break
-            
             if cpu_count is not None:
                 st.sidebar.metric("CPU Cores", cpu_count)
             else:
@@ -712,34 +649,23 @@ def build_sidebar():
         else:
             st.sidebar.metric("Available RAM", "N/A")
             st.sidebar.metric("CPU Cores", "N/A")
-            
     except Exception as e:
         st.sidebar.error(f"Error getting system info: {str(e)}")
         st.sidebar.metric("Available RAM", "N/A")
         st.sidebar.metric("CPU Cores", "N/A")
-    
-    # Progress tracking
     st.sidebar.subheader("📈 Progress")
-    
-    # Check completion status
     data_uploaded = st.session_state.get('uploaded_data_path') is not None
     preprocessing_done = st.session_state.get('preprocessing_done', False)
     extraction_done = st.session_state.get('extraction_done', False)
     analysis_done = st.session_state.get('univariate_results') is not None or st.session_state.get('lasso_features') is not None
-    
-    # Progress indicators
     st.sidebar.write("✅ Data Upload" if data_uploaded else "⏳ Data Upload")
     st.sidebar.write("✅ Pre-processing" if preprocessing_done else "⏳ Pre-processing")
     st.sidebar.write("✅ Feature Extraction" if extraction_done else "⏳ Feature Extraction")
     st.sidebar.write("✅ Analysis" if analysis_done else "⏳ Analysis")
-    
-    # Session state info
     if st.sidebar.button("🗑️ Clear Session"):
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
-    
-    # Help section
     st.sidebar.subheader("❓ Help")
     with st.sidebar.expander("Quick Start Guide"):
         st.write("""
@@ -749,52 +675,38 @@ def build_sidebar():
         4. **Extract Features**: Configure and run radiomics extraction
         5. **Analyze**: Upload outcomes and run statistical analysis
         """)
-    
     with st.sidebar.expander("Supported Formats"):
         st.write("""
         - **DICOM**: .dcm, .DCM files
         - **Archives**: .zip files containing DICOM
         - **Outcomes**: .csv files with PatientID column
         """)
-    
-    # About section
     st.sidebar.subheader("ℹ️ About")
     st.sidebar.write("RadiomicsGUI v2.0")
     st.sidebar.write("Built with PyRadiomics & Streamlit")
     st.sidebar.write("© 2024 Radiomics Research")
 
 def main():
-    """Main function to build the complete Streamlit application."""
     st.set_page_config(
         page_title="RadiomicsGUI",
         page_icon="🔬",
         layout="wide",
         initial_sidebar_state="expanded"
     )
-    
-    # Build sidebar
     build_sidebar()
-    
-    # Main content area
     st.title("🔬 RadiomicsGUI - Advanced Radiomics Analysis Platform")
     st.markdown("---")
-    
-    # Create tabs
     tab1, tab2, tab3 = st.tabs([
         "📤 Data Upload & Pre-processing",
         "🔥 Feature Extraction", 
         "📊 Statistical Analysis"
     ])
-    
     with tab1:
         build_tab1_data_upload()
-    
     with tab2:
-        build_tab2__feature_extraction()
-    
+        build_tab2_feature_extraction()
     with tab3:
         build_tab3_analysis()
-
 
 if __name__ == "__main__":
     main()
