@@ -51,7 +51,8 @@ try:
     from analysis import (
         run_univariate_analysis,
         run_lasso_selection,
-        generate_correlation_heatmap
+        generate_correlation_heatmap,
+        generate_highlights,
     )
 
     from utils import (
@@ -1118,6 +1119,78 @@ def build_extraction_execution_section():
             status_text.empty()
 
 
+# --- HIGHLIGHTS PANEL ---
+def build_highlights_panel():
+    """
+    Render a Highlights card at the top of Tab 3 that summarises the key
+    findings discovered so far in the current session.
+    """
+    merged_df = st.session_state.get('merged_df')
+    outcome = st.session_state.get('selected_outcome')
+    univariate_results = st.session_state.get('univariate_results')
+    lasso_features = st.session_state.get('lasso_features')
+
+    if merged_df is None or outcome is None:
+        return
+
+    try:
+        highlights = generate_highlights(
+            merged_df=merged_df,
+            target_variable=outcome,
+            univariate_results=univariate_results,
+            lasso_features=lasso_features,
+        )
+    except Exception:
+        return
+
+    st.subheader("✨ Highlights")
+
+    # --- Top-level metrics row ---
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Patients analysed", highlights['n_patients'])
+    m2.metric("Features included", highlights['n_features'])
+    m3.metric("Missing data", f"{highlights['missing_data_pct']} %")
+
+    outcome_summary = highlights.get('outcome_summary', {})
+    if outcome_summary:
+        m4.metric(
+            f"'{outcome}' mean ± SD",
+            f"{outcome_summary.get('mean', '—')} ± {outcome_summary.get('std', '—')}",
+        )
+
+    # --- Top findings ---
+    found_something = highlights['top_univariate'] or highlights['top_lasso']
+    if found_something:
+        left, right = st.columns(2)
+
+        with left:
+            if highlights['top_univariate']:
+                st.markdown("**Top Univariate Features** (by |correlation|)")
+                for rank, entry in enumerate(highlights['top_univariate'], start=1):
+                    st.markdown(
+                        f"{rank}. `{entry['feature']}` — correlation **{entry['correlation']}**"
+                    )
+
+        with right:
+            if highlights['top_lasso']:
+                st.markdown("**Top LASSO-Selected Features** (by |coefficient|)")
+                for rank, entry in enumerate(highlights['top_lasso'], start=1):
+                    st.markdown(
+                        f"{rank}. `{entry['feature']}` — coefficient **{entry['coefficient']}**"
+                    )
+
+    # --- Outcome distribution summary ---
+    if outcome_summary:
+        with st.expander("📊 Outcome variable statistics"):
+            stat_cols = st.columns(4)
+            stat_cols[0].metric("Min", outcome_summary.get('min', '—'))
+            stat_cols[1].metric("Mean", outcome_summary.get('mean', '—'))
+            stat_cols[2].metric("Std Dev", outcome_summary.get('std', '—'))
+            stat_cols[3].metric("Max", outcome_summary.get('max', '—'))
+
+    st.divider()
+
+
 # --- ENHANCED TAB 3 - ANALYSIS ---
 def build_tab3_analysis():
     """Enhanced Tab 3 with comprehensive statistical analysis"""
@@ -1126,6 +1199,9 @@ def build_tab3_analysis():
         return
 
     st.header("Step 3: Enhanced Statistical Analysis & Feature Selection")
+
+    # Highlights panel – shown whenever a merged dataset + outcome are available
+    build_highlights_panel()
 
     # Enhanced outcome data section
     build_enhanced_outcome_section()
@@ -1655,6 +1731,45 @@ def build_advanced_analysis_section(merged_df, selected_outcome):
 
     st.button("🔄 Run Advanced Analysis", disabled=True, help="Advanced methods will be available in future updates")
 
+def _sidebar_highlights():
+    """Render a compact Highlights block in the sidebar."""
+    merged_df = st.session_state.get('merged_df')
+    outcome = st.session_state.get('selected_outcome')
+
+    if merged_df is None or outcome is None:
+        return
+
+    try:
+        highlights = generate_highlights(
+            merged_df=merged_df,
+            target_variable=outcome,
+            univariate_results=st.session_state.get('univariate_results'),
+            lasso_features=st.session_state.get('lasso_features'),
+        )
+    except Exception:
+        return
+
+    st.sidebar.subheader("✨ Highlights")
+
+    st.sidebar.metric("Patients analysed", highlights['n_patients'])
+    st.sidebar.metric("Features", highlights['n_features'])
+    st.sidebar.metric("Missing data", f"{highlights['missing_data_pct']} %")
+
+    if highlights['top_univariate']:
+        best = highlights['top_univariate'][0]
+        st.sidebar.write(
+            f"**Best univariate:** `{best['feature']}` (r={best['correlation']})"
+        )
+
+    if highlights['top_lasso']:
+        best = highlights['top_lasso'][0]
+        st.sidebar.write(
+            f"**Best LASSO:** `{best['feature']}` (β={best['coefficient']})"
+        )
+
+    st.sidebar.divider()
+
+
 # --- ENHANCED SIDEBAR ---
 def build_sidebar():
     """Enhanced sidebar with comprehensive information and controls"""
@@ -1748,6 +1863,9 @@ def build_sidebar():
     st.sidebar.write(f"**IBSI Features:** {ibsi_status}")
 
     st.sidebar.divider()
+
+    # --- Highlights summary ---
+    _sidebar_highlights()
 
     # Enhanced controls
     st.sidebar.subheader("🔧 Enhanced Controls")

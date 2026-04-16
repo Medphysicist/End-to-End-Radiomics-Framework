@@ -238,6 +238,86 @@ def generate_correlation_heatmap(merged_df, columns_to_include):
 
     return fig
 
+def generate_highlights(
+    merged_df,
+    target_variable,
+    univariate_results=None,
+    lasso_features=None,
+):
+    """
+    Summarise the most important findings from the analysis into a structured
+    highlights dictionary that can be rendered in the UI.
+
+    Args:
+        merged_df (pd.DataFrame): Merged features + outcome DataFrame.
+        target_variable (str): Name of the outcome column.
+        univariate_results (pd.DataFrame | None): Output of run_univariate_analysis.
+        lasso_features (dict | None): Output of run_lasso_selection.
+
+    Returns:
+        dict: Keys include:
+            - 'n_patients' (int)
+            - 'n_features' (int)
+            - 'top_univariate' (list[dict])  – up to 3 entries with Feature & Correlation
+            - 'top_lasso' (list[dict])       – up to 3 entries with Feature & Coefficient
+            - 'outcome_summary' (dict)        – descriptive stats for the outcome
+            - 'missing_data_pct' (float)      – % of cells that are NaN in feature cols
+    """
+    highlights = {}
+
+    # Basic dataset info
+    feature_cols = [
+        c for c in merged_df.columns
+        if c not in ['PatientID', target_variable, 'modality', 'timepoint',
+                     'series_uid', 'roi_voxel_count', 'roi_percentage', 'extraction_timestamp']
+        and pd.api.types.is_numeric_dtype(merged_df[c])
+    ]
+    highlights['n_patients'] = len(merged_df)
+    highlights['n_features'] = len(feature_cols)
+
+    # Outcome summary
+    if target_variable in merged_df.columns and pd.api.types.is_numeric_dtype(merged_df[target_variable]):
+        s = merged_df[target_variable].describe()
+        highlights['outcome_summary'] = {
+            'mean': round(float(s.get('mean', float('nan'))), 4),
+            'std': round(float(s.get('std', float('nan'))), 4),
+            'min': round(float(s.get('min', float('nan'))), 4),
+            'max': round(float(s.get('max', float('nan'))), 4),
+        }
+    else:
+        highlights['outcome_summary'] = {}
+
+    # Missing data percentage across feature columns
+    if feature_cols:
+        total_cells = len(merged_df) * len(feature_cols)
+        missing_cells = int(merged_df[feature_cols].isna().sum().sum())
+        highlights['missing_data_pct'] = round((missing_cells / total_cells) * 100, 2) if total_cells > 0 else 0.0
+    else:
+        highlights['missing_data_pct'] = 0.0
+
+    # Top univariate features
+    if univariate_results is not None and not univariate_results.empty:
+        top_uni = univariate_results.head(3)
+        highlights['top_univariate'] = [
+            {'feature': row['Feature'], 'correlation': round(float(row['Absolute Correlation']), 4)}
+            for _, row in top_uni.iterrows()
+        ]
+    else:
+        highlights['top_univariate'] = []
+
+    # Top LASSO features
+    if lasso_features:
+        sorted_lasso = sorted(lasso_features.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
+        highlights['top_lasso'] = [
+            {'feature': feat, 'coefficient': round(float(coef), 4)}
+            for feat, coef in sorted_lasso
+        ]
+    else:
+        highlights['top_lasso'] = []
+
+    return highlights
+
+
 def generate_feature_importance_plot(feature_importances, title="Feature Importance"):
     """
     Generates a bar plot of feature importances with proper seaborn syntax.
