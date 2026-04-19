@@ -829,73 +829,65 @@ def create_fallback_mask(image_sitk, patient_id, status_placeholder=None):
 
 # --- ENHANCED MODALITY DETECTION ---
 
+def _classify_enhanced_modality(modality, sequence_name="", series_description="", protocol_name=""):
+    """Classify DICOM modality using metadata fields from a single header."""
+    modality = (modality or 'Unknown').upper()
+    sequence_name = (sequence_name or '').upper()
+    series_description = (series_description or '').upper()
+    protocol_name = (protocol_name or '').upper()
+
+    if modality == 'MR':
+        all_descriptions = f"{sequence_name} {series_description} {protocol_name}"
+        if any(keyword in all_descriptions for keyword in ['T1', 'T1W', 'T1_', 'MPRAGE', 'SPGR']):
+            return 'MR_T1'
+        if any(keyword in all_descriptions for keyword in ['T2', 'T2W', 'T2_', 'TSE', 'FSE']):
+            return 'MR_T2'
+        if any(keyword in all_descriptions for keyword in ['FLAIR', 'FLUID']):
+            return 'MR_FLAIR'
+        if any(keyword in all_descriptions for keyword in ['DWI', 'DIFFUSION', 'ADC']):
+            return 'MR_DWI'
+        if any(keyword in all_descriptions for keyword in ['SWI', 'SWAN', 'SUSCEPTIBILITY']):
+            return 'MR_SWI'
+        if any(keyword in all_descriptions for keyword in ['TOF', 'ANGIO', 'MRA']):
+            return 'MR_TOF'
+        if any(keyword in all_descriptions for keyword in ['PERFUSION', 'PWI', 'DSC', 'DCE']):
+            return 'MR_PERFUSION'
+        return 'MR'
+
+    if modality == 'PT':
+        if 'CT' in series_description:
+            return 'PT_CT'
+        if 'ATTN' in series_description or 'ATTEN' in series_description:
+            return 'PT_ATTN'
+        if 'FDG' in series_description:
+            return 'PT_FDG'
+        return 'PT'
+
+    if modality == 'CT':
+        if any(keyword in series_description for keyword in ['CONTRAST', 'POST', 'ENHANCED', 'C+']):
+            return 'CT_CONTRAST'
+        if any(keyword in series_description for keyword in ['PLAIN', 'PRE', 'NON', 'NATIVE']):
+            return 'CT_PLAIN'
+        if 'ANGIO' in series_description or 'CTA' in series_description:
+            return 'CT_ANGIO'
+        return 'CT'
+
+    return modality
+
+
 def enhanced_modality_detection(dcm_file_path):
     """
     Enhanced modality detection with better MRI/PET support and sub-classification
     """
     try:
         dcm = pydicom.dcmread(dcm_file_path, stop_before_pixels=True)
-        
-        # Primary modality
-        modality = getattr(dcm, 'Modality', 'Unknown')
-        
-        # Enhanced detection for specific cases
-        if modality == 'MR':
-            # Check sequence name and series description for MRI specifics
-            sequence_name = getattr(dcm, 'SequenceName', '').upper()
-            series_description = getattr(dcm, 'SeriesDescription', '').upper()
-            protocol_name = getattr(dcm, 'ProtocolName', '').upper()
-            
-            # Combine all description fields for analysis
-            all_descriptions = f"{sequence_name} {series_description} {protocol_name}"
-            
-            # Enhanced MR sub-classification
-            if any(keyword in all_descriptions for keyword in ['T1', 'T1W', 'T1_', 'MPRAGE', 'SPGR']):
-                return 'MR_T1'
-            elif any(keyword in all_descriptions for keyword in ['T2', 'T2W', 'T2_', 'TSE', 'FSE']):
-                return 'MR_T2'
-            elif any(keyword in all_descriptions for keyword in ['FLAIR', 'FLUID']):
-                return 'MR_FLAIR'
-            elif any(keyword in all_descriptions for keyword in ['DWI', 'DIFFUSION', 'ADC']):
-                return 'MR_DWI'
-            elif any(keyword in all_descriptions for keyword in ['SWI', 'SWAN', 'SUSCEPTIBILITY']):
-                return 'MR_SWI'
-            elif any(keyword in all_descriptions for keyword in ['TOF', 'ANGIO', 'MRA']):
-                return 'MR_TOF'
-            elif any(keyword in all_descriptions for keyword in ['PERFUSION', 'PWI', 'DSC', 'DCE']):
-                return 'MR_PERFUSION'
-            else:
-                return 'MR'
-        
-        elif modality == 'PT':
-            # Enhanced PET detection
-            series_description = getattr(dcm, 'SeriesDescription', '').upper()
-            
-            # Check for PET/CT combination
-            if 'CT' in series_description:
-                return 'PT_CT'
-            elif 'ATTN' in series_description or 'ATTEN' in series_description:
-                return 'PT_ATTN'
-            elif 'FDG' in series_description:
-                return 'PT_FDG'
-            else:
-                return 'PT'
-        
-        elif modality == 'CT':
-            # Enhanced CT detection
-            series_description = getattr(dcm, 'SeriesDescription', '').upper()
-            
-            if any(keyword in series_description for keyword in ['CONTRAST', 'POST', 'ENHANCED', 'C+']):
-                return 'CT_CONTRAST'
-            elif any(keyword in series_description for keyword in ['PLAIN', 'PRE', 'NON', 'NATIVE']):
-                return 'CT_PLAIN'
-            elif 'ANGIO' in series_description or 'CTA' in series_description:
-                return 'CT_ANGIO'
-            else:
-                return 'CT'
-        
-        return modality
-        
+        return _classify_enhanced_modality(
+            getattr(dcm, 'Modality', 'Unknown'),
+            getattr(dcm, 'SequenceName', ''),
+            getattr(dcm, 'SeriesDescription', ''),
+            getattr(dcm, 'ProtocolName', '')
+        )
+
     except Exception as e:
         print(f"Error in enhanced modality detection: {e}")
         return 'Unknown'
@@ -908,6 +900,169 @@ def get_supported_modalities():
         'MR', 'MR_T1', 'MR_T2', 'MR_FLAIR', 'MR_DWI', 'MR_SWI', 'MR_TOF', 'MR_PERFUSION',
         'PT', 'PT_CT', 'PT_ATTN', 'PT_FDG'
     ]
+
+
+def _modality_family(modality):
+    """Map modality labels to canonical families for matching."""
+    modality = (modality or "").upper()
+    if modality.startswith("CT"):
+        return "CT"
+    if modality.startswith("MR"):
+        return "MR"
+    if modality.startswith("PT") or modality.startswith("PET"):
+        return "PT"
+    return modality
+
+
+def _modality_matches_selection(detected_modality, selected_modality):
+    """Return True if detected modality should be included for user selection."""
+    detected_modality = (detected_modality or "").upper()
+    selected_modality = (selected_modality or "").upper()
+    if detected_modality == selected_modality:
+        return True
+    return _modality_family(detected_modality) == _modality_family(selected_modality)
+
+
+def _collect_patient_dicom_files(data_path):
+    """
+    Build a patient index from DICOM headers, independent of folder structure.
+
+    This supports both:
+    1) data_path/<patient>/<series>/...
+    2) data_path/<series>/... (single patient with multiple series)
+    """
+    patient_map = {}
+
+    for dirpath, _, filenames in os.walk(data_path):
+        for filename in filenames:
+            if not filename.lower().endswith((".dcm", ".ima", ".dicom")) and "." in filename:
+                continue
+
+            full_path = os.path.join(dirpath, filename)
+            try:
+                dcm = pydicom.dcmread(full_path, stop_before_pixels=True)
+            except Exception:
+                continue
+
+            patient_id = str(getattr(dcm, "PatientID", "")).strip() or "UnknownPatient"
+            entry = patient_map.setdefault(
+                patient_id,
+                {"patient_id": patient_id, "dicom_files": [], "source_dirs": set()}
+            )
+            entry["dicom_files"].append(full_path)
+            entry["source_dirs"].add(dirpath)
+
+    entries = []
+    for patient_id, entry in patient_map.items():
+        entries.append({
+            "patient_id": patient_id,
+            "dicom_files": sorted(entry["dicom_files"]),
+            "source_dirs": sorted(entry["source_dirs"])
+        })
+
+    return sorted(entries, key=lambda x: x["patient_id"])
+
+
+def _build_patient_scan_bundle_from_files(dicom_files):
+    """
+    Build scan-ready RTSTRUCT and series structures from a patient's DICOM files.
+    """
+    rtstruct_files = []
+    series_data = {}  # modality -> timepoint -> series_uid -> series_info
+    available_modalities = set()
+
+    for full_path in dicom_files:
+        try:
+            dcm = pydicom.dcmread(full_path, stop_before_pixels=True)
+        except Exception:
+            continue
+
+        raw_modality = str(getattr(dcm, "Modality", "Unknown")).upper()
+        if raw_modality == "RTSTRUCT":
+            rtstruct_files.append(full_path)
+            continue
+
+        modality = _classify_enhanced_modality(
+            raw_modality,
+            getattr(dcm, "SequenceName", ""),
+            getattr(dcm, "SeriesDescription", ""),
+            getattr(dcm, "ProtocolName", "")
+        )
+        if modality not in get_supported_modalities():
+            continue
+
+        available_modalities.add(modality)
+        series_uid = getattr(dcm, "SeriesInstanceUID", "UnknownSeries")
+        study_date = getattr(dcm, "StudyDate", "")
+        study_time = getattr(dcm, "StudyTime", "")
+        acquisition_date = getattr(dcm, "AcquisitionDate", study_date)
+        acquisition_time = getattr(dcm, "AcquisitionTime", study_time)
+        if study_date and study_time:
+            timepoint = f"{study_date}_{study_time[:6]}"
+        elif study_date:
+            timepoint = study_date
+        else:
+            timepoint = "TP_Unknown"
+
+        series_entry = (
+            series_data
+            .setdefault(modality, {})
+            .setdefault(timepoint, {})
+            .setdefault(series_uid, {
+                "path": os.path.dirname(full_path),
+                "files": [],
+                "series_description": getattr(dcm, "SeriesDescription", ""),
+                "study_date": study_date,
+                "study_time": study_time,
+                "acquisition_date": acquisition_date,
+                "acquisition_time": acquisition_time,
+                "slice_count": 0
+            })
+        )
+        series_entry["files"].append(full_path)
+        series_entry["slice_count"] += 1
+
+    return rtstruct_files, series_data, available_modalities
+
+
+def _build_patient_preprocess_bundle_from_files(dicom_files, selected_modality):
+    """
+    Build preprocessing candidates from one patient's DICOM files.
+    """
+    rtstruct_files = []
+    series_candidates_by_uid = {}
+
+    for full_path in dicom_files:
+        try:
+            dcm = pydicom.dcmread(full_path, stop_before_pixels=True)
+        except Exception:
+            continue
+
+        raw_modality = str(getattr(dcm, "Modality", "Unknown")).upper()
+        if raw_modality == "RTSTRUCT":
+            rtstruct_files.append(full_path)
+            continue
+
+        detected_modality = _classify_enhanced_modality(
+            raw_modality,
+            getattr(dcm, "SequenceName", ""),
+            getattr(dcm, "SeriesDescription", ""),
+            getattr(dcm, "ProtocolName", "")
+        )
+
+        if not _modality_matches_selection(detected_modality, selected_modality):
+            continue
+
+        series_uid = getattr(dcm, "SeriesInstanceUID", "UnknownSeries")
+        series_entry = series_candidates_by_uid.setdefault(series_uid, {
+            "path": os.path.dirname(full_path),
+            "series_uid": series_uid,
+            "file_count": 0,
+            "detected_modality": detected_modality
+        })
+        series_entry["file_count"] += 1
+
+    return rtstruct_files, list(series_candidates_by_uid.values())
 
 
 # --- NIFTI DATA PROCESSING ---
@@ -1184,7 +1339,11 @@ def preprocess_nifti_data(data_path, selected_pairs):
 
 def scan_uploaded_data_for_contours_enhanced(data_path, selected_modalities=['CT'], multi_series_mode=False):
     """
-    Enhanced scanning with comprehensive multi-modality and longitudinal support
+    Enhanced scanning with comprehensive multi-modality and longitudinal support.
+
+    Patient grouping is based on DICOM PatientID so both of these layouts work:
+    1) <root>/<patient>/<series>/files
+    2) <root>/<series>/files (single patient spread across series folders)
     """
     all_contours = set()
     patient_contour_data = {}
@@ -1195,173 +1354,130 @@ def scan_uploaded_data_for_contours_enhanced(data_path, selected_modalities=['CT
     if not data_path or not os.path.isdir(data_path):
         return [], {}, {}, list(available_modalities), {}
 
-    patient_dirs = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
-    
-    # Setup progress tracking
-    progress_tracker = ProgressTracker(len(patient_dirs), "Enhanced DICOM scanning")
-    
-    with st.status("Enhanced scanning for multi-modality data...", expanded=True) as status:
-        for i, patient_id in enumerate(patient_dirs):
-            progress_tracker.update(i, f"Scanning {patient_id}")
-            
-            patient_path = os.path.join(data_path, patient_id)
-            patient_status[patient_id] = {'status': 'error', 'issues': [], 'contours': []}
-            
-            try:
-                # Enhanced file scanning with better organization
-                rtstruct_files = []
-                series_data = {}  # modality -> timepoint -> series_uid -> series_info
-                
-                for dirpath, _, filenames in os.walk(patient_path):
-                    for f in filenames:
-                        if not f.lower().endswith(('.dcm', '.ima', '.dicom')) and '.' in f:
-                            continue
-                        
-                        full_path = os.path.join(dirpath, f)
-                        try:
-                            dcm = pydicom.dcmread(full_path, stop_before_pixels=True)
-                            modality = enhanced_modality_detection(full_path)
-                            
-                            if modality == 'RTSTRUCT':
-                                rtstruct_files.append(full_path)
-                            elif modality in get_supported_modalities():
-                                available_modalities.add(modality)
-                                series_uid = getattr(dcm, 'SeriesInstanceUID', 'UnknownSeries')
-                                
-                                # Enhanced timepoint extraction
-                                study_date = getattr(dcm, 'StudyDate', '')
-                                study_time = getattr(dcm, 'StudyTime', '')
-                                acquisition_date = getattr(dcm, 'AcquisitionDate', study_date)
-                                acquisition_time = getattr(dcm, 'AcquisitionTime', study_time)
-                                
-                                # Create comprehensive timepoint identifier
-                                if study_date and study_time:
-                                    timepoint = f"{study_date}_{study_time[:6]}"  # YYYYMMDD_HHMMSS
-                                elif study_date:
-                                    timepoint = study_date
-                                else:
-                                    timepoint = 'TP_Unknown'
-                                
-                                # Initialize nested dictionary structure
-                                if modality not in series_data:
-                                    series_data[modality] = {}
-                                if timepoint not in series_data[modality]:
-                                    series_data[modality][timepoint] = {}
-                                if series_uid not in series_data[modality][timepoint]:
-                                    series_data[modality][timepoint][series_uid] = {
-                                        'path': dirpath,
-                                        'files': [],
-                                        'series_description': getattr(dcm, 'SeriesDescription', ''),
-                                        'study_date': study_date,
-                                        'study_time': study_time,
-                                        'acquisition_date': acquisition_date,
-                                        'acquisition_time': acquisition_time,
-                                        'slice_count': 0
-                                    }
-                                
-                                series_data[modality][timepoint][series_uid]['files'].append(full_path)
-                                series_data[modality][timepoint][series_uid]['slice_count'] += 1
-                        except Exception:
-                            continue
+    patient_entries = _collect_patient_dicom_files(data_path)
 
-                # Enhanced compatibility checking
+    # Setup progress tracking
+    progress_tracker = ProgressTracker(len(patient_entries), "Enhanced DICOM scanning")
+
+    with st.status("Enhanced scanning for multi-modality data...", expanded=True):
+        for i, patient_entry in enumerate(patient_entries):
+            patient_id = patient_entry['patient_id']
+            dicom_files = patient_entry['dicom_files']
+            progress_tracker.update(i, f"Scanning {patient_id}")
+
+            patient_status[patient_id] = {'status': 'error', 'issues': [], 'contours': []}
+
+            try:
+                rtstruct_files, series_data, patient_modalities = _build_patient_scan_bundle_from_files(dicom_files)
+                available_modalities.update(patient_modalities)
+
+                # Include modality subtypes that match the user's selected family (e.g., CT includes CT_CONTRAST)
+                matching_modalities = [
+                    modality
+                    for modality in series_data.keys()
+                    if any(_modality_matches_selection(modality, requested) for requested in selected_modalities)
+                ]
+
                 compatible_pairs = []
-                
+
                 if multi_series_mode:
                     # Multi-series mode: collect all compatible combinations
-                    for modality in selected_modalities:
-                        if modality in series_data:
-                            for timepoint, timepoint_series in series_data[modality].items():
-                                for series_uid, series_info in timepoint_series.items():
-                                    for rt_path in rtstruct_files:
-                                        try:
-                                            # Test compatibility with enhanced error handling
-                                            rtstruct = RTStructBuilder.create_from(
-                                                dicom_series_path=series_info['path'],
-                                                rt_struct_path=rt_path
-                                            )
-                                            contours = rtstruct.get_roi_names()
-                                            
-                                            if contours:  # Only add if contours found
-                                                compatible_pairs.append({
-                                                    'modality': modality,
-                                                    'timepoint': timepoint,
-                                                    'series_uid': series_uid,
-                                                    'series_path': series_info['path'],
-                                                    'rtstruct_path': rt_path,
-                                                    'contours': contours,
-                                                    'series_description': series_info['series_description'],
-                                                    'study_date': series_info['study_date'],
-                                                    'slice_count': series_info['slice_count']
-                                                })
-                                                
-                                                all_contours.update(contours)
-                                                
-                                        except Exception as e:
-                                            # Log compatibility issues for debugging
-                                            continue
-                else:
-                    # Single series mode: select best series for each modality
-                    for modality in selected_modalities:
-                        if modality in series_data:
-                            # Select most recent timepoint
-                            sorted_timepoints = sorted(series_data[modality].keys(), reverse=True)
-                            latest_timepoint = sorted_timepoints[0]
-                            timepoint_series = series_data[modality][latest_timepoint]
-                            
-                            # Select series with most slices
-                            best_series_uid = max(timepoint_series.keys(), 
-                                                key=lambda x: timepoint_series[x]['slice_count'])
-                            series_info = timepoint_series[best_series_uid]
-                            
-                            for rt_path in rtstruct_files:
-                                try:
-                                    rtstruct = RTStructBuilder.create_from(
-                                        dicom_series_path=series_info['path'],
-                                        rt_struct_path=rt_path
-                                    )
-                                    contours = rtstruct.get_roi_names()
-                                    
-                                    if contours:
-                                        compatible_pairs.append({
-                                            'modality': modality,
-                                            'timepoint': latest_timepoint,
-                                            'series_uid': best_series_uid,
-                                            'series_path': series_info['path'],
-                                            'rtstruct_path': rt_path,
-                                            'contours': contours,
-                                            'series_description': series_info['series_description'],
-                                            'study_date': series_info['study_date'],
-                                            'slice_count': series_info['slice_count']
-                                        })
-                                        
-                                        all_contours.update(contours)
-                                        break  # Use first compatible pair for single mode
-                                        
-                                except Exception:
-                                    continue
+                    for modality in matching_modalities:
+                        for timepoint, timepoint_series in series_data[modality].items():
+                            for series_uid, series_info in timepoint_series.items():
+                                for rt_path in rtstruct_files:
+                                    try:
+                                        rtstruct = RTStructBuilder.create_from(
+                                            dicom_series_path=series_info['path'],
+                                            rt_struct_path=rt_path
+                                        )
+                                        contours = rtstruct.get_roi_names()
 
-                # Update patient status and data
+                                        if contours:
+                                            compatible_pairs.append({
+                                                'modality': modality,
+                                                'timepoint': timepoint,
+                                                'series_uid': series_uid,
+                                                'series_path': series_info['path'],
+                                                'rtstruct_path': rt_path,
+                                                'contours': contours,
+                                                'series_description': series_info['series_description'],
+                                                'study_date': series_info['study_date'],
+                                                'slice_count': series_info['slice_count']
+                                            })
+                                            all_contours.update(contours)
+
+                                    except Exception:
+                                        continue
+                else:
+                    # Single-series mode: select one best compatible series per requested modality
+                    for requested_modality in selected_modalities:
+                        candidate_modalities = [
+                            m for m in matching_modalities
+                            if _modality_matches_selection(m, requested_modality)
+                        ]
+                        if not candidate_modalities:
+                            continue
+
+                        candidate_modalities = sorted(
+                            candidate_modalities,
+                            key=lambda m: (0 if m.upper() == requested_modality.upper() else 1, m)
+                        )
+                        modality = candidate_modalities[0]
+
+                        sorted_timepoints = sorted(series_data[modality].keys(), reverse=True)
+                        latest_timepoint = sorted_timepoints[0]
+                        timepoint_series = series_data[modality][latest_timepoint]
+
+                        best_series_uid = max(
+                            timepoint_series.keys(),
+                            key=lambda x: timepoint_series[x]['slice_count']
+                        )
+                        series_info = timepoint_series[best_series_uid]
+
+                        for rt_path in rtstruct_files:
+                            try:
+                                rtstruct = RTStructBuilder.create_from(
+                                    dicom_series_path=series_info['path'],
+                                    rt_struct_path=rt_path
+                                )
+                                contours = rtstruct.get_roi_names()
+
+                                if contours:
+                                    compatible_pairs.append({
+                                        'modality': modality,
+                                        'timepoint': latest_timepoint,
+                                        'series_uid': best_series_uid,
+                                        'series_path': series_info['path'],
+                                        'rtstruct_path': rt_path,
+                                        'contours': contours,
+                                        'series_description': series_info['series_description'],
+                                        'study_date': series_info['study_date'],
+                                        'slice_count': series_info['slice_count']
+                                    })
+                                    all_contours.update(contours)
+                                    break
+
+                            except Exception:
+                                continue
+
                 if compatible_pairs:
-                    # For backward compatibility, use first pair's contours
                     patient_contour_data[patient_id] = compatible_pairs[0]['contours']
                     patient_status[patient_id]['status'] = 'success'
                     patient_status[patient_id]['contours'] = compatible_pairs[0]['contours']
-                    
-                    # Store comprehensive longitudinal data
+
                     longitudinal_data[patient_id] = {
                         'compatible_pairs': compatible_pairs,
                         'series_data': series_data,
                         'rtstruct_files': rtstruct_files,
                         'available_modalities': list(series_data.keys())
                     }
-                    
+
                     st.success(f"  - ✅ Found {len(compatible_pairs)} compatible series for `{patient_id}`")
                 else:
                     st.error(f"  - ❌ No compatible pairs found for `{patient_id}`")
                     patient_status[patient_id]['issues'].append("No compatible pairs found")
-                    
-                    # Store debugging information
+
                     longitudinal_data[patient_id] = {
                         'compatible_pairs': [],
                         'series_data': series_data,
@@ -1376,17 +1492,16 @@ def scan_uploaded_data_for_contours_enhanced(data_path, selected_modalities=['CT
             except Exception as e:
                 st.error(f"  - Critical error processing `{patient_id}`: {e}")
                 patient_status[patient_id]['issues'].append(f"Critical error: {e}")
-        
+
         progress_tracker.complete("Enhanced DICOM scanning complete")
 
     return (
-        sorted(list(all_contours)), 
-        patient_contour_data, 
-        patient_status, 
-        sorted(list(available_modalities)), 
+        sorted(list(all_contours)),
+        patient_contour_data,
+        patient_status,
+        sorted(list(available_modalities)),
         longitudinal_data
     )
-
 
 def preprocess_uploaded_data_enhanced(data_path, target_contour_name, 
                                     selected_modalities=['CT'], 
@@ -1727,15 +1842,16 @@ def scan_uploaded_data_for_contours(data_path, selected_modality='CT'):
 
 def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='CT'):
     """
-    Original preprocessing function - processes each patient folder sequentially with ULTIMATE ROBUST MASK GENERATION + SAVING.
-    Updated: 2025-08-22 03:53:05 UTC by Medphysicist
+    Original preprocessing function - processes each patient sequentially with
+    ultimate robust mask generation + saving.
 
-    Complete ultimate robust mask generation with 5 methods and comprehensive saving system.
+    Patient grouping is based on DICOM PatientID so this supports both patient-folder
+    and one-patient/multi-series folder layouts.
     """
     # Create a single output directory for all NIfTI files for this session
     output_dir = tempfile.mkdtemp(prefix="radiomics_nifti_")
-    st.session_state['temp_output_dir'] = output_dir # Store for later cleanup
-    
+    st.session_state['temp_output_dir'] = output_dir  # Store for later cleanup
+
     dataset_records = []
     failed_patients = {}  # Track failed patients with reasons
     recovery_stats = {
@@ -1750,19 +1866,21 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
         'alternative_format_saved': 0,
         'failed': 0
     }
-    
-    patient_dirs = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
-    total_patients = len(patient_dirs)
-    
+
+    patient_entries = _collect_patient_dicom_files(data_path)
+    total_patients = len(patient_entries)
+
     # Get UI elements from session state for progress updates
     progress_bar = st.session_state.get('ui_progress_bar')
     progress_text = st.session_state.get('ui_progress_text')
     status_placeholder = st.session_state.get('ui_status_placeholder')
-    
+
     # Process each patient sequentially
-    for i, patient_id in enumerate(patient_dirs):
+    for i, patient_entry in enumerate(patient_entries):
+        patient_id = patient_entry['patient_id']
+        dicom_files = patient_entry['dicom_files']
         current_progress = (i + 1) / total_patients
-        
+
         # Update progress bar and text
         if progress_bar:
             progress_bar.progress(current_progress)
@@ -1770,58 +1888,29 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
             progress_text.text(f"Processing patient {i+1}/{total_patients}: {patient_id} ({current_progress*100:.1f}%)")
         if status_placeholder:
             status_placeholder.info(f"🔄 Processing {patient_id}...")
-        
-        patient_path = os.path.join(data_path, patient_id)
-        
+
         try:
             # Find the main image series (filtered by modality) and RTSTRUCT
-            rtstruct_files = []
-            series_candidates = []
-            
-            for root, _, files in os.walk(patient_path):
-                for f in files:
-                    if not f.lower().endswith(('.dcm', '.ima')) and '.' in f:
-                        continue
-                    
-                    full_path = os.path.join(root, f)
-                    try:
-                        dcm = pydicom.dcmread(full_path, stop_before_pixels=True)
-                        modality = getattr(dcm, 'Modality', 'Unknown')
-                        
-                        if modality == 'RTSTRUCT':
-                            rtstruct_files.append(full_path)
-                        elif modality == selected_modality:
-                            series_uid = getattr(dcm, 'SeriesInstanceUID', 'UnknownSeries')
-                            # Store series info with slice count for better selection
-                            series_candidates.append({
-                                'path': root,
-                                'series_uid': series_uid,
-                                'file_count': len([f for f in os.listdir(root) if f.lower().endswith(('.dcm', '.ima'))])
-                            })
-                    except Exception:
-                        continue
-            
+            rtstruct_files, series_candidates = _build_patient_preprocess_bundle_from_files(
+                dicom_files,
+                selected_modality
+            )
+
             # Select the series with the most files (likely the main imaging series)
             if not series_candidates:
                 reason = f"No {selected_modality} image series found"
-                failed_patients[patient_id] = {'reason': reason, 'details': f"Searched in: {patient_path}"}
+                failed_patients[patient_id] = {'reason': reason, 'details': f"Scanned {len(dicom_files)} DICOM files"}
                 recovery_stats['failed'] += 1
                 if status_placeholder:
                     status_placeholder.warning(f"⚠️ Skipping {patient_id}: {reason}")
                 continue
-            
-            # Remove duplicates and select the series with most files
-            unique_series = {}
-            for candidate in series_candidates:
-                if candidate['series_uid'] not in unique_series or candidate['file_count'] > unique_series[candidate['series_uid']]['file_count']:
-                    unique_series[candidate['series_uid']] = candidate
-            
-            best_series = max(unique_series.values(), key=lambda x: x['file_count'])
+
+            best_series = max(series_candidates, key=lambda x: x['file_count'])
             series_path = best_series['path']
-            
+
             if not rtstruct_files:
                 reason = "No RTSTRUCT files found"
-                failed_patients[patient_id] = {'reason': reason, 'details': f"Searched in: {patient_path}"}
+                failed_patients[patient_id] = {'reason': reason, 'details': f"Scanned {len(dicom_files)} DICOM files"}
                 recovery_stats['failed'] += 1
                 if status_placeholder:
                     status_placeholder.warning(f"⚠️ Skipping {patient_id}: {reason}")
@@ -1831,16 +1920,15 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
             compatible_pair = None
             for rt_file in rtstruct_files:
                 try:
-                    # Test compatibility
                     rtstruct = RTStructBuilder.create_from(
-                        dicom_series_path=series_path, 
+                        dicom_series_path=series_path,
                         rt_struct_path=rt_file
                     )
                     compatible_pair = (series_path, rt_file, rtstruct)
                     break
-                except Exception as e:
+                except Exception:
                     continue
-            
+
             if not compatible_pair:
                 reason = f"No compatible RTSTRUCT/{selected_modality} pair found"
                 failed_patients[patient_id] = {'reason': reason, 'details': f"Tried {len(rtstruct_files)} RTSTRUCT files"}
@@ -1848,7 +1936,7 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                 if status_placeholder:
                     status_placeholder.warning(f"⚠️ Skipping {patient_id}: {reason}")
                 continue
-            
+
             series_path, rt_file, rtstruct = compatible_pair
 
             # Find the exact contour name (case-insensitive search)
@@ -1858,7 +1946,7 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                 if target_contour_name.lower() in roi.lower():
                     actual_roi_name = roi
                     break
-            
+
             if not actual_roi_name:
                 reason = f"Target contour '{target_contour_name}' not found"
                 failed_patients[patient_id] = {'reason': reason, 'details': f"Available contours: {available_rois}"}
@@ -1887,39 +1975,39 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                 if status_placeholder:
                     status_placeholder.warning(f"⚠️ Skipping {patient_id}: {reason}")
                 continue
-            
+
             reader.SetFileNames(dicom_names)
             image_sitk = reader.Execute()
-            
+
             # ============================================================================
             # ULTIMATE ROBUST MASK GENERATION WITH 5 DIFFERENT METHODS
             # ============================================================================
-            
+
             if status_placeholder:
                 status_placeholder.info(f"🎯 Starting ULTIMATE ROBUST mask generation for {patient_id}...")
-            
+
             # Try all 5 robust methods in sequence
             mask_3d, used_roi_name, recovery_method = ultimate_mask_recovery_robust(
                 rtstruct, actual_roi_name, image_sitk, series_path, patient_id, status_placeholder
             )
-            
+
             # Update recovery statistics
             if recovery_method and recovery_method in recovery_stats:
                 recovery_stats[recovery_method] += 1
-            
+
             # Step 2: Try alternative ROI names if all 5 methods failed
             if mask_3d is None:
                 if status_placeholder:
                     status_placeholder.info(f"  - All 5 robust methods failed, trying alternative ROI names for {patient_id}...")
-                
+
                 available_rois = rtstruct.get_roi_names()
                 similar_rois = find_similar_roi_names(available_rois, target_contour_name)
-                
+
                 for alt_roi, similarity, method in similar_rois[:3]:  # Try top 3 matches
                     alt_mask, alt_used_roi, alt_recovery_method = ultimate_mask_recovery_robust(
                         rtstruct, alt_roi, image_sitk, series_path, patient_id, status_placeholder
                     )
-                    
+
                     if alt_mask is not None:
                         mask_3d = alt_mask
                         used_roi_name = alt_used_roi
@@ -1928,44 +2016,44 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                         if status_placeholder:
                             status_placeholder.success(f"  - ✅ Alternative ROI '{alt_roi}' worked for {patient_id}")
                         break
-            
+
             # Step 3: Final fallback only if absolutely everything failed
             if mask_3d is None:
                 if status_placeholder:
                     status_placeholder.info(f"  - Even alternative ROIs failed, creating fallback mask for {patient_id}...")
-                
+
                 mask_3d = create_fallback_mask(image_sitk, patient_id, status_placeholder)
                 if mask_3d is not None:
                     recovery_method = "fallback_placeholder"
                     used_roi_name = f"{target_contour_name}_fallback"
                     recovery_stats['fallback_placeholder'] += 1
-            
+
             # Check if we have a valid mask to proceed
             if mask_3d is None or np.sum(mask_3d > 0) == 0:
                 reason = "ULTIMATE MASK GENERATION FAILURE: All recovery methods failed"
                 failed_patients[patient_id] = {
                     'reason': reason,
-                    'details': f"Tried: 5 robust methods, alternative ROIs, fallback mask - ALL FAILED"
+                    'details': "Tried: 5 robust methods, alternative ROIs, fallback mask - ALL FAILED"
                 }
                 recovery_stats['failed'] += 1
                 if status_placeholder:
                     status_placeholder.error(f"💥 ULTIMATE MASK GENERATION FAILURE: All methods failed for {patient_id}")
                 continue
-            
+
             # ============================================================================
             # ROBUST MASK CONVERSION AND SAVING WITH DEBUG
             # ============================================================================
-            
+
             if status_placeholder:
                 status_placeholder.info(f"🔍 Starting robust mask conversion and saving for {patient_id}...")
-            
+
             # Step 1: Robust conversion to SimpleITK
             mask_sitk, conversion_debug = robust_mask_to_sitk_conversion(mask_3d, image_sitk, patient_id, status_placeholder)
-            
+
             if mask_sitk is None:
                 reason = "Failed to convert mask to SimpleITK format"
                 failed_patients[patient_id] = {
-                    'reason': reason, 
+                    'reason': reason,
                     'details': f"All conversion methods failed. Debug: {conversion_debug}"
                 }
                 recovery_stats['failed'] += 1
@@ -1978,14 +2066,14 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                 # Check if conversion was rescued
                 if any('_final_voxels' in key and key != 'standard_conversion_final_voxels' for key in conversion_debug):
                     recovery_stats['conversion_rescued'] += 1
-            
+
             # Step 2: Create output directory and file paths FIRST
             patient_output_dir = os.path.join(output_dir, patient_id)
             os.makedirs(patient_output_dir, exist_ok=True)
-            
+
             output_image_path = os.path.join(patient_output_dir, "image.nii.gz")
             output_mask_path = os.path.join(patient_output_dir, "mask.nii.gz")
-            
+
             # Step 3: Smart dimension handling with resampling bypass
             try:
                 mask_size = mask_sitk.GetSize()
@@ -1994,32 +2082,32 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                 if mask_size != image_size:
                     if status_placeholder:
                         status_placeholder.info(f"  - Dimension mismatch for {patient_id}: Image {image_size} vs Mask {mask_size}")
-                    
+
                     # Try to bypass resampling first
                     mask_sitk, resampling_bypassed = bypass_resampling_when_possible(
                         mask_sitk, image_sitk, patient_id, status_placeholder
                     )
-                    
+
                     # If we couldn't bypass, use smart resampling
                     if not resampling_bypassed:
                         resampled_mask, final_voxels = smart_mask_resampling_with_coordinate_preservation(
                             mask_3d, mask_sitk, image_sitk, patient_id, status_placeholder
                         )
-                        
+
                         if resampled_mask is None or final_voxels == 0:
                             reason = "Smart resampling failed - all coordinate alignment methods failed"
                             failed_patients[patient_id] = {
-                                'reason': reason, 
+                                'reason': reason,
                                 'details': f"Original mask had {np.sum(mask_3d > 0)} voxels, all resampling methods failed"
                             }
                             recovery_stats['failed'] += 1
                             if status_placeholder:
                                 status_placeholder.error(f"💥 Smart resampling failed for {patient_id}")
                             continue
-                        
+
                         mask_sitk = resampled_mask
                         recovery_stats['smart_resampling_rescued'] = recovery_stats.get('smart_resampling_rescued', 0) + 1
-                        
+
                         if status_placeholder:
                             status_placeholder.success(f"  - Smart resampling preserved {final_voxels} voxels for {patient_id}")
 
@@ -2030,7 +2118,7 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                 if status_placeholder:
                     status_placeholder.error(f"❌ Dimension handling failed for {patient_id}: {e}")
                 continue
-            
+
             # Step 4: Save image file
             try:
                 sitk.WriteImage(image_sitk, output_image_path)
@@ -2041,21 +2129,21 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                 if status_placeholder:
                     status_placeholder.error(f"❌ Failed to save image for {patient_id}: {e}")
                 continue
-            
+
             # Step 5: Robust mask saving with multiple methods
             mask_saved_successfully, final_voxel_count, actual_mask_path = robust_mask_file_saving(
                 mask_sitk, output_mask_path, patient_id, status_placeholder
             )
-            
+
             # Step 6: Try alternative formats if standard saving failed
             if not mask_saved_successfully:
                 if status_placeholder:
                     status_placeholder.warning(f"⚠️ Standard NIfTI saving failed for {patient_id}, trying alternative formats...")
-                
+
                 alt_mask_path, alt_voxel_count = alternative_mask_saving_formats(
                     mask_3d, image_sitk, patient_output_dir, patient_id, status_placeholder
                 )
-                
+
                 if alt_mask_path and alt_voxel_count > 0:
                     actual_mask_path = alt_mask_path
                     final_voxel_count = alt_voxel_count
@@ -2063,7 +2151,7 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                     recovery_stats['alternative_format_saved'] = recovery_stats.get('alternative_format_saved', 0) + 1
                     if status_placeholder:
                         status_placeholder.success(f"✅ Alternative format saved {patient_id} successfully!")
-            
+
             # Step 7: Final check
             if not mask_saved_successfully or final_voxel_count == 0:
                 reason = "ULTIMATE SAVING FAILURE: All saving methods failed or resulted in empty files"
@@ -2077,15 +2165,15 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                     with st.expander(f"🔍 Full Debug Info for {patient_id}"):
                         st.json(conversion_debug)
                 continue
-            
+
             # ============================================================================
             # RECORD CREATION WITH RECOVERY INFORMATION
             # ============================================================================
-            
+
             dataset_records.append({
                 'patient_id': patient_id,
                 'image_path': output_image_path,
-                'mask_path': actual_mask_path,  # Use actual_mask_path here
+                'mask_path': actual_mask_path,
                 'roi_name': used_roi_name,
                 'modality': selected_modality,
                 'recovery_method': recovery_method,
@@ -2093,7 +2181,7 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
                 'needs_review': recovery_method != "robust_rt_utils",
                 'voxel_count': int(final_voxel_count)
             })
-            
+
             if status_placeholder:
                 method_display = recovery_method.replace('robust_', '').replace('_', ' ').title()
                 status_placeholder.success(f"🎉 SUCCESS: {patient_id} processed with {method_display} ({final_voxel_count:,} voxels)")
@@ -2105,14 +2193,14 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
             if status_placeholder:
                 status_placeholder.error(f"💥 Critical error for {patient_id}: {e}")
             continue
-    
+
     # Final progress update with enhanced recovery statistics
     if progress_bar:
         progress_bar.progress(1.0)
     if progress_text:
         success_count = len(dataset_records)
         progress_text.text(f"ULTIMATE PROCESSING COMPLETE! {success_count}/{total_patients} patients successfully processed")
-    
+
     if status_placeholder:
         success_count = len(dataset_records)
         status_placeholder.success(f"🏆 ULTIMATE PROCESSING COMPLETE! {success_count}/{total_patients} patients processed successfully")
@@ -2130,3 +2218,4 @@ def preprocess_uploaded_data(data_path, target_contour_name, selected_modality='
     }
 
     return pd.DataFrame(dataset_records), processing_summary
+
