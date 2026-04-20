@@ -47,6 +47,7 @@ try:
         scan_uploaded_data_for_contours_enhanced,
         preprocess_uploaded_data_enhanced,
         preprocess_nifti_data,
+        preprocess_selected_combinations,
         enhanced_modality_detection,
         get_supported_modalities
     )
@@ -579,8 +580,30 @@ def build_dicom_analysis_section():
                             else:
                                 st.warning(f"No compatible pairs for {patient_id}")
 
-        # Enhanced ROI selection
-        build_enhanced_roi_selection()
+        # Workflow mode selector: Standard vs Advanced Search
+        st.divider()
+        st.subheader("🧭 Preprocessing Workflow")
+        workflow_mode = st.radio(
+            "Choose a preprocessing workflow:",
+            [
+                "Standard (pick one / multiple / all ROIs across all patients)",
+                "🔎 Advanced Search (user-assisted Patient / Series / ROI selection)"
+            ],
+            index=0,
+            horizontal=False,
+            help=(
+                "Advanced Search lets you categorize the scan results into three "
+                "boxes — Patient, Series, and ROI — and apply your choice to all "
+                "patients or a selected subset. It also supports multiple series "
+                "and multiple ROIs per patient."
+            ),
+            key="workflow_mode_radio"
+        )
+
+        if workflow_mode.startswith("Standard"):
+            build_enhanced_roi_selection()
+        else:
+            build_advanced_search_section()
 
 def build_nifti_analysis_section():
     """NIfTI-specific analysis section"""
@@ -1099,8 +1122,402 @@ def build_enhanced_roi_selection():
     else:
         st.info("ℹ️ Select ROI(s) to enable preprocessing.")
 
+
+# =============================================================================
+# ADVANCED SEARCH WORKFLOW (User-assisted Patient / Series / ROI selection)
+# =============================================================================
+
+def _flatten_longitudinal_to_rows():
+    """
+    Flatten st.session_state.longitudinal_data into a list of unique
+    (patient, series, ROI) rows for the Advanced Search UI.
+
+    Returns a list of dicts with keys:
+        patient_id, modality, timepoint, series_uid, series_description,
+        study_date, slice_count, series_path, rtstruct_path, roi_name
+    Plus a second list of "series rows" (one per compatible pair, with a
+    contours list) used for per-series ROI selection.
+    """
+    longitudinal = st.session_state.get('longitudinal_data', {}) or {}
+    combo_rows = []
+    series_rows = []
+
+    for patient_id, patient_long in longitudinal.items():
+        for pair in patient_long.get('compatible_pairs', []):
+            series_rows.append({
+                'patient_id': patient_id,
+                'modality': pair.get('modality', 'CT'),
+                'timepoint': pair.get('timepoint', ''),
+                'series_uid': pair.get('series_uid', ''),
+                'series_description': pair.get('series_description', 'Unknown_Series'),
+                'study_date': pair.get('study_date', ''),
+                'slice_count': pair.get('slice_count', 0),
+                'series_path': pair.get('series_path', ''),
+                'rtstruct_path': pair.get('rtstruct_path', ''),
+                'contours': list(pair.get('contours', []) or []),
+            })
+            for roi in pair.get('contours', []) or []:
+                combo_rows.append({
+                    'patient_id': patient_id,
+                    'modality': pair.get('modality', 'CT'),
+                    'timepoint': pair.get('timepoint', ''),
+                    'series_uid': pair.get('series_uid', ''),
+                    'series_description': pair.get('series_description', 'Unknown_Series'),
+                    'study_date': pair.get('study_date', ''),
+                    'slice_count': pair.get('slice_count', 0),
+                    'series_path': pair.get('series_path', ''),
+                    'rtstruct_path': pair.get('rtstruct_path', ''),
+                    'roi_name': roi,
+                })
+
+    return combo_rows, series_rows
+
+
+def _series_label(s):
+    """Human-friendly label for a series row."""
+    desc = s.get('series_description') or 'Unknown_Series'
+    mod = s.get('modality', '')
+    tp = s.get('timepoint', '')
+    parts = [p for p in [mod, desc, tp] if p]
+    label = " | ".join(parts) if parts else desc
+    if s.get('slice_count'):
+        label += f"  ({s['slice_count']} slices)"
+    return label
+
+
+def build_advanced_search_section():
+    """
+    Advanced Search workflow - user-assisted Patient/Series/ROI selection.
+
+    The user is shown three selection boxes:
+      - Box 1: Patients (apply to all or a selected subset)
+      - Box 2: Series   (per-patient series descriptions/timepoints)
+      - Box 3: ROIs     (contour names detected across selected series)
+
+    The UI builds the set of (patient, series, ROI) combinations that will
+    be processed, lets the user preview a plan summary (how many patients,
+    how many series per patient, how many ROIs per series), and then runs
+    preprocess_selected_combinations() to generate the dataset.
+
+    Supports multiple series and corresponding ROI processing within a
+    single patient folder.
+    """
+    st.divider()
+    st.header("Step 1.3: 🔎 Advanced Search - User-Assisted Selection")
+
+    longitudinal = st.session_state.get('longitudinal_data', {}) or {}
+    if not longitudinal:
+        st.warning(
+            "⚠️ Advanced Search requires the enhanced scan output. "
+            "Please run the scan button above first."
+        )
+        return
+
+    combo_rows, series_rows = _flatten_longitudinal_to_rows()
+    if not series_rows:
+        st.error("❌ No compatible Series/RTSTRUCT pairs were found. Nothing to categorize.")
+        return
+
+    st.caption(
+        "Categorize the scan results into three boxes — Patient, Series, ROI — "
+        "and apply the selection to all patients or a selected subset. "
+        "Multiple series and multiple ROIs per patient are supported."
+    )
+
+    all_patients = sorted({s['patient_id'] for s in series_rows})
+
+    # ---- Box 1: Patient scope ----------------------------------------------
+    st.subheader("📦 Box 1 — Patient Selection")
+    col_a, col_b = st.columns([1, 2])
+    with col_a:
+        patient_scope = st.radio(
+            "Apply to:",
+            ["All patients", "Selected subset"],
+            index=0,
+            key="adv_patient_scope",
+            help="Apply the series/ROI selection to every patient, or to a subset you pick."
+        )
+    with col_b:
+        if patient_scope == "Selected subset":
+            selected_patients = st.multiselect(
+                "Choose patients:",
+                options=all_patients,
+                default=all_patients[: min(5, len(all_patients))],
+                key="adv_selected_patients",
+                help="Only these patients will be processed."
+            )
+        else:
+            selected_patients = all_patients
+            st.info(f"All {len(all_patients)} patient(s) will be included.")
+
+    if not selected_patients:
+        st.warning("Select at least one patient to continue.")
+        return
+
+    # Filter to selected patients
+    filtered_series = [s for s in series_rows if s['patient_id'] in selected_patients]
+
+    # ---- Box 2: Series selection -------------------------------------------
+    st.subheader("📦 Box 2 — Series Selection")
+    series_descriptions = sorted({s.get('series_description') or 'Unknown_Series' for s in filtered_series})
+    modalities_present = sorted({s.get('modality', 'CT') for s in filtered_series})
+
+    col_s1, col_s2 = st.columns(2)
+    with col_s1:
+        series_mode = st.radio(
+            "Series strategy:",
+            [
+                "Match by series description (recommended)",
+                "All series per patient",
+                "Latest series per patient per modality"
+            ],
+            index=0,
+            key="adv_series_mode",
+            help=(
+                "• Match by series description: pick one or more Series Descriptions; "
+                "every matching series across selected patients is used.\n"
+                "• All series per patient: use every series for each selected patient "
+                "(enables multi-series processing).\n"
+                "• Latest series: one series per (patient, modality) — the most recent one."
+            )
+        )
+    with col_s2:
+        selected_modalities_adv = st.multiselect(
+            "Modalities to include:",
+            options=modalities_present,
+            default=modalities_present,
+            key="adv_modalities",
+            help="Restrict to specific modalities present in the scan."
+        )
+
+    selected_series_descriptions = []
+    if series_mode.startswith("Match by series description"):
+        default_desc = series_descriptions[:1] if series_descriptions else []
+        selected_series_descriptions = st.multiselect(
+            "Series descriptions to include:",
+            options=series_descriptions,
+            default=default_desc,
+            key="adv_series_descriptions",
+            help="Pick one or more series descriptions. Every matching series is processed."
+        )
+        if not selected_series_descriptions:
+            st.warning("Select at least one series description.")
+            return
+
+    # Apply series filters
+    def _series_passes_filters(s):
+        if s.get('modality', 'CT') not in selected_modalities_adv:
+            return False
+        if series_mode.startswith("Match by series description"):
+            return (s.get('series_description') or 'Unknown_Series') in selected_series_descriptions
+        return True
+
+    candidate_series = [s for s in filtered_series if _series_passes_filters(s)]
+
+    if series_mode.startswith("Latest series"):
+        latest = {}
+        for s in candidate_series:
+            key = (s['patient_id'], s.get('modality', 'CT'))
+            cur = latest.get(key)
+            if cur is None or (s.get('timepoint', '') > cur.get('timepoint', '')):
+                latest[key] = s
+        candidate_series = list(latest.values())
+
+    if not candidate_series:
+        st.error("❌ No series match the current selection. Loosen the filters.")
+        return
+
+    # ---- Box 3: ROI selection ----------------------------------------------
+    st.subheader("📦 Box 3 — ROI Selection")
+    roi_universe = sorted({roi for s in candidate_series for roi in s.get('contours', [])})
+    if not roi_universe:
+        st.error("❌ No ROIs are available in the currently selected series.")
+        return
+
+    col_r1, col_r2 = st.columns(2)
+    with col_r1:
+        roi_mode = st.radio(
+            "ROI strategy:",
+            [
+                "Select specific ROIs",
+                "All ROIs per series"
+            ],
+            index=0,
+            key="adv_roi_mode",
+            help="Pick one or more ROI names to look for in every selected series, or process every ROI of every selected series."
+        )
+    with col_r2:
+        if roi_mode == "Select specific ROIs":
+            selected_rois_adv = st.multiselect(
+                "ROI names (case-insensitive match):",
+                options=roi_universe,
+                default=roi_universe[: min(2, len(roi_universe))],
+                key="adv_selected_rois",
+                help="Each selected ROI is processed in every matching series. Missing ROIs are skipped per-series."
+            )
+        else:
+            selected_rois_adv = None
+            st.info(f"📋 All ROIs of each selected series will be processed ({len(roi_universe)} unique ROIs available).")
+
+    if roi_mode == "Select specific ROIs" and not selected_rois_adv:
+        st.warning("Select at least one ROI.")
+        return
+
+    # ---- Build final (patient, series, ROI) combinations -------------------
+    combinations = []
+    for s in candidate_series:
+        series_contours = s.get('contours', []) or []
+        if selected_rois_adv is None:
+            target_rois = series_contours
+        else:
+            target_rois = []
+            for want in selected_rois_adv:
+                match = None
+                for c in series_contours:
+                    if c == want or c.lower() == want.lower():
+                        match = c
+                        break
+                if match is None:
+                    for c in series_contours:
+                        if want.lower() in c.lower():
+                            match = c
+                            break
+                if match is not None and match not in target_rois:
+                    target_rois.append(match)
+
+        for roi in target_rois:
+            combinations.append({
+                'patient_id': s['patient_id'],
+                'modality': s.get('modality', 'CT'),
+                'timepoint': s.get('timepoint', ''),
+                'series_uid': s.get('series_uid', ''),
+                'series_description': s.get('series_description', 'Unknown_Series'),
+                'study_date': s.get('study_date', ''),
+                'slice_count': s.get('slice_count', 0),
+                'series_path': s.get('series_path', ''),
+                'rtstruct_path': s.get('rtstruct_path', ''),
+                'roi_name': roi,
+            })
+
+    # ---- Plan summary -------------------------------------------------------
+    st.divider()
+    st.subheader("📋 Extraction Plan Summary")
+
+    if not combinations:
+        st.error("❌ The current selection does not produce any (Patient × Series × ROI) combinations to process.")
+        return
+
+    plan_df = pd.DataFrame(combinations)
+    unique_patients = plan_df['patient_id'].nunique()
+    total_combos = len(plan_df)
+
+    # Series per patient
+    series_per_patient = (
+        plan_df.groupby('patient_id')[['series_uid', 'series_description']]
+        .apply(lambda d: d.drop_duplicates().shape[0])
+    )
+    # ROI per (patient, series)
+    roi_per_series = (
+        plan_df.groupby(['patient_id', 'series_description', 'series_uid'])['roi_name']
+        .nunique()
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Patients", unique_patients)
+    with m2:
+        st.metric("Series (total)", plan_df[['patient_id', 'series_uid']].drop_duplicates().shape[0])
+    with m3:
+        st.metric("Avg series / patient", f"{series_per_patient.mean():.1f}")
+    with m4:
+        st.metric("Avg ROI / series", f"{roi_per_series.mean():.1f}")
+
+    st.caption(f"Total (Patient × Series × ROI) combinations to process: **{total_combos}**")
+
+    with st.expander("🔍 Show detailed plan", expanded=False):
+        preview_df = plan_df[[
+            'patient_id', 'modality', 'series_description', 'timepoint', 'roi_name', 'slice_count'
+        ]].rename(columns={
+            'patient_id': 'Patient',
+            'modality': 'Modality',
+            'series_description': 'Series',
+            'timepoint': 'Timepoint',
+            'roi_name': 'ROI',
+            'slice_count': 'Slices'
+        })
+        st.dataframe(preview_df, use_container_width=True)
+
+    with st.expander("📊 Per-patient breakdown", expanded=False):
+        breakdown = (
+            plan_df.groupby(['patient_id'])
+            .agg(
+                n_series=('series_uid', lambda x: x.nunique()),
+                n_rois=('roi_name', 'nunique'),
+                n_combinations=('roi_name', 'size')
+            )
+            .reset_index()
+            .rename(columns={
+                'patient_id': 'Patient',
+                'n_series': 'Series',
+                'n_rois': 'Unique ROIs',
+                'n_combinations': 'Combinations'
+            })
+        )
+        st.dataframe(breakdown, use_container_width=True)
+
+    # ---- Run preprocessing --------------------------------------------------
+    st.divider()
+    if st.button(
+        f"🚀 Run Advanced Preprocessing on {total_combos} Combination(s)",
+        type="primary",
+        key="adv_run_preprocessing"
+    ):
+        progress_bar = st.progress(0.0)
+        progress_text = st.empty()
+        status_placeholder = st.empty()
+        st.session_state['ui_progress_bar'] = progress_bar
+        st.session_state['ui_progress_text'] = progress_text
+        st.session_state['ui_status_placeholder'] = status_placeholder
+
+        try:
+            result_df, summary = preprocess_selected_combinations(combinations)
+
+            if result_df is None or result_df.empty:
+                st.error("❌ Advanced preprocessing produced no valid results.")
+                build_preprocessing_error_display(summary)
+                return
+
+            st.session_state.dataset_df = result_df
+            st.session_state.preprocessing_done = True
+            st.session_state['processing_summary'] = summary
+            st.session_state['advanced_plan_summary'] = {
+                'requested_patients': unique_patients,
+                'requested_series': int(plan_df[['patient_id', 'series_uid']].drop_duplicates().shape[0]),
+                'requested_combinations': total_combos,
+            }
+
+            st.success(
+                f"✅ Advanced preprocessing complete: "
+                f"{summary['successful_combinations']}/{summary['total_combinations']} combinations succeeded "
+                f"across {summary['successful_patients']} patient(s)."
+            )
+            build_preprocessing_results_display(result_df, summary)
+        except Exception as e:
+            st.error(f"❌ Advanced preprocessing failed: {str(e)}")
+            with st.expander("🔍 Error Details"):
+                st.code(traceback.format_exc())
+        finally:
+            try:
+                progress_bar.empty()
+                progress_text.empty()
+                status_placeholder.empty()
+            except Exception:
+                pass
+
+
 # Keep all Tab 2 and Tab 3 functions unchanged from v1
 # These work with the expanded dataset created by build_enhanced_roi_selection()
+# or build_advanced_search_section()
 
 def build_tab2_feature_extraction():
     """Enhanced Tab 2 with IBSI support"""
@@ -1320,6 +1737,94 @@ def build_enhanced_extraction_configuration():
                     st.write("- Verify extraction settings are valid")
                     st.write("- Ensure dataset_df exists in session state")
 
+def build_pre_extraction_summary():
+    """
+    Show a concise summary BEFORE radiomic feature extraction begins.
+
+    Reports, for the dataset that will be fed into extraction:
+      • Total unique patients
+      • Total series and average series per patient
+      • Total ROIs and average ROIs per series
+      • Per-patient breakdown (series count, ROI count, total combinations)
+    """
+    dataset_df = st.session_state.get('dataset_df')
+    if dataset_df is None or dataset_df.empty:
+        return
+
+    st.subheader("🧾 Pre-Extraction Summary")
+    st.caption(
+        "Review what will be sent to radiomic feature extraction: "
+        "how many patients, how many series per patient, and how many ROIs per series."
+    )
+
+    total_rows = len(dataset_df)
+    n_patients = dataset_df['patient_id'].nunique() if 'patient_id' in dataset_df.columns else total_rows
+
+    # Identify series uniquely using series_uid if available, else series_description
+    if 'series_uid' in dataset_df.columns and dataset_df['series_uid'].astype(str).str.len().gt(0).any():
+        series_key_cols = ['patient_id', 'series_uid']
+    elif 'series_description' in dataset_df.columns:
+        series_key_cols = ['patient_id', 'series_description']
+    else:
+        series_key_cols = ['patient_id']
+
+    series_pairs = dataset_df[series_key_cols].drop_duplicates() if set(series_key_cols).issubset(dataset_df.columns) else dataset_df[['patient_id']].drop_duplicates()
+    n_series_total = len(series_pairs)
+    avg_series_per_patient = (n_series_total / n_patients) if n_patients else 0
+
+    if 'roi_name' in dataset_df.columns:
+        rois_per_series = (
+            dataset_df.groupby(series_key_cols)['roi_name']
+            .nunique()
+        )
+        n_unique_rois = dataset_df['roi_name'].nunique()
+        avg_rois_per_series = rois_per_series.mean() if len(rois_per_series) else 0
+    else:
+        n_unique_rois = 1
+        avg_rois_per_series = 1.0
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Patients", n_patients)
+    with c2:
+        st.metric("Series (total)", n_series_total)
+    with c3:
+        st.metric("Avg series / patient", f"{avg_series_per_patient:.2f}")
+    with c4:
+        st.metric("Avg ROIs / series", f"{avg_rois_per_series:.2f}")
+
+    c5, c6 = st.columns(2)
+    with c5:
+        st.metric("Unique ROI names", n_unique_rois)
+    with c6:
+        st.metric("Total extraction tasks", total_rows)
+
+    with st.expander("📊 Per-patient breakdown", expanded=False):
+        agg_args = {}
+        if 'series_uid' in dataset_df.columns:
+            agg_args['Series'] = ('series_uid', lambda x: x.nunique())
+        elif 'series_description' in dataset_df.columns:
+            agg_args['Series'] = ('series_description', lambda x: x.nunique())
+        else:
+            agg_args['Series'] = ('patient_id', 'size')
+
+        if 'roi_name' in dataset_df.columns:
+            agg_args['Unique_ROIs'] = ('roi_name', 'nunique')
+
+        agg_args['Tasks'] = ('patient_id', 'size')
+
+        try:
+            breakdown = (
+                dataset_df.groupby('patient_id')
+                .agg(**agg_args)
+                .reset_index()
+                .rename(columns={'patient_id': 'Patient'})
+            )
+            st.dataframe(breakdown, use_container_width=True)
+        except Exception:
+            st.dataframe(dataset_df.head(50), use_container_width=True)
+
+
 def build_extraction_execution_section():
     """Extraction execution - works with multi-ROI dataset from preprocessing"""
     if not st.session_state.get('pyradiomics_params'):
@@ -1372,6 +1877,11 @@ def build_extraction_execution_section():
         st.info("IBSI compliance ensures standardized feature naming")
 
     st.markdown("---")
+
+    # ------------------------------------------------------------------
+    # Pre-extraction summary: patients, series/patient, ROI/series
+    # ------------------------------------------------------------------
+    build_pre_extraction_summary()
 
     if st.button("🔥 Start Feature Extraction", type="primary"):
         progress_bar = st.progress(0)
