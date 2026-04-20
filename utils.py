@@ -1,737 +1,945 @@
 # utils.py
 """
-Enhanced utility and helper functions for the Radiomics Pipeline application.
-Updated: 2025-08-22 03:38:48 UTC by Medphysicist
+Utility functions for the Enhanced Radiomics Framework.
+Updated: 2025-11-03 22:32:37 UTC by Medphysicist
 
 Features:
-- Original session state management and system monitoring
-- Enhanced NIfTI file support
-- Progress tracking with ETA estimation  
-- Multi-modality support (CT, MRI, PET)
-- Longitudinal data handling
-- IBSI feature support
-- Comprehensive cleanup system
+- Session state management with multi-ROI tracking
+- Progress tracking and ETA calculations
+- File type detection and validation
+- NIfTI file handling and organization
+- ROI categorization and management (NEW - Multi-ROI support)
+- Cleanup and resource management
+- System resource monitoring
+
+Multi-ROI Enhancements:
+- ROI categorization (Targets, OARs, Other structures)
+- Extended ROI naming patterns for better classification
+- Multi-ROI session tracking
+- ROI availability analysis across patients/series
 """
 
-import streamlit as st
-import pandas as pd
-import psutil
 import os
 import shutil
-import atexit
+import tempfile
 import time
+import psutil
+import streamlit as st
+import SimpleITK as sitk
 import numpy as np
 from pathlib import Path
-import SimpleITK as sitk
-import pydicom
-import tempfile
-import zipfile
+from typing import Dict, List, Tuple, Optional, Set
+import re
 
-# --- Enhanced Session State Management ---
+
+# =============================================================================
+# SESSION STATE MANAGEMENT (Multi-ROI Enhanced)
+# =============================================================================
 
 def initialize_session_state():
     """
-    Enhanced session state initialization combining original keys with new features
+    Initialize Streamlit session state with all required variables.
+    Enhanced with multi-ROI tracking capabilities.
     """
-    defaults = {
-        # ORIGINAL KEYS (preserved from V3)
-        'uploaded_data_path': None,      # Path to organized DICOM data
-        'temp_output_dir': None,         # Path to temporary NIfTI files
-        'preprocessing_done': False,     # Flag to indicate if pre-processing is complete
-        'dataset_df': pd.DataFrame(),    # DataFrame with paths to NIfTI files
-        'all_contours': [],              # List of all unique contours found
-        'patient_contour_data': {},      # Dict mapping patients to their contours
-        'patient_status': {},            # Dict tracking processing status per patient
-        'features_df': None,             # DataFrame with extracted radiomic features
-        'clinical_df': None,             # DataFrame with uploaded clinical data
-        'merged_df': None,               # DataFrame with merged features and clinical data
-        'cleanup_registered': False,     # Flag to ensure cleanup runs only once
-        'workflow_type': None,           # Type of workflow: 'single' or 'multiple'
-        'directory_analysis': {},        # Directory analysis results for multiple patients
-        'single_patient_info': {},       # Single patient analysis results
-        'selected_pair': None,           # Selected imaging/RTSTRUCT pair for processing
-        'selected_roi': None,            # Selected ROI for processing
-        'selected_modality': None,       # Selected imaging modality
-        'eligible_patients': [],         # List of patients eligible for processing
-        
-        # NEW ENHANCED KEYS
-        'input_format': 'dicom',         # 'dicom' or 'nifti'
-        'multi_series_mode': False,      # Enable multi-series processing
-        'longitudinal_data': {},         # Longitudinal/timepoint data
-        'available_timepoints': [],      # Available timepoints
-        'selected_timepoints': [],       # Selected timepoints for processing
-        'ibsi_features_enabled': False,  # Enable IBSI-specific features
-        'progress_tracker': None,        # Progress tracking instance
-        'modality_specific_params': {},  # Modality-specific parameters
-        'series_selection_data': {},     # Series selection information
-        'extraction_method': 'pyradiomics', # 'pyradiomics', 'ibsi', or 'combined'
-        'available_modalities': [],      # Available modalities in dataset
-        'selected_modalities': [],       # Selected modalities for processing
-        'nifti_pairs': {},              # NIfTI image/mask pairs
-        'eta_enabled': True,            # Enable ETA calculations
-        'processing_summary': {},       # Processing summary information
-        'extraction_summary': {}        # Extraction summary information
-    }
+    # Original session state variables
+    if 'uploaded_data_path' not in st.session_state:
+        st.session_state.uploaded_data_path = None
     
-    for key, default_value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = default_value
+    if 'all_contours' not in st.session_state:
+        st.session_state.all_contours = []
+    
+    if 'patient_contour_data' not in st.session_state:
+        st.session_state.patient_contour_data = {}
+    
+    if 'patient_status' not in st.session_state:
+        st.session_state.patient_status = {}
+    
+    if 'dataset_df' not in st.session_state:
+        st.session_state.dataset_df = None
+    
+    if 'preprocessing_done' not in st.session_state:
+        st.session_state.preprocessing_done = False
+    
+    if 'features_df' not in st.session_state:
+        st.session_state.features_df = None
+    
+    if 'extraction_done' not in st.session_state:
+        st.session_state.extraction_done = False
+    
+    if 'pyradiomics_params' not in st.session_state:
+        st.session_state.pyradiomics_params = None
+    
+    if 'selected_modality' not in st.session_state:
+        st.session_state.selected_modality = 'CT'
+    
+    if 'temp_output_dir' not in st.session_state:
+        st.session_state.temp_output_dir = None
+    
+    if 'output_directory' not in st.session_state:
+        st.session_state.output_directory = 'output'
+    
+    # Enhanced multi-modality support
+    if 'selected_modalities' not in st.session_state:
+        st.session_state.selected_modalities = ['CT']
+    
+    if 'available_modalities' not in st.session_state:
+        st.session_state.available_modalities = set()
+    
+    if 'multi_series_mode' not in st.session_state:
+        st.session_state.multi_series_mode = False
+    
+    if 'longitudinal_data' not in st.session_state:
+        st.session_state.longitudinal_data = {}
+    
+    if 'input_format' not in st.session_state:
+        st.session_state.input_format = 'dicom'
+    
+    # ✅ NEW: Multi-ROI tracking
+    if 'selected_rois' not in st.session_state:
+        st.session_state.selected_rois = []
+    
+    if 'roi_processing_mode' not in st.session_state:
+        st.session_state.roi_processing_mode = 'single'  # 'single', 'multiple', 'all'
+    
+    if 'roi_categories' not in st.session_state:
+        st.session_state.roi_categories = {
+            'targets': [],
+            'oars': [],
+            'other': []
+        }
+    
+    if 'roi_availability' not in st.session_state:
+        st.session_state.roi_availability = {}  # patient_id -> [available_rois]
+    
+    if 'multi_roi_session_id' not in st.session_state:
+        st.session_state.multi_roi_session_id = None
+    
+    # UI progress tracking elements
+    if 'ui_progress_bar' not in st.session_state:
+        st.session_state.ui_progress_bar = None
+    
+    if 'ui_progress_text' not in st.session_state:
+        st.session_state.ui_progress_text = None
+    
+    if 'ui_status_placeholder' not in st.session_state:
+        st.session_state.ui_status_placeholder = None
+    
+    # Analysis results
+    if 'outcome_df' not in st.session_state:
+        st.session_state.outcome_df = None
+    
+    if 'merged_df' not in st.session_state:
+        st.session_state.merged_df = None
+    
+    if 'univariate_results' not in st.session_state:
+        st.session_state.univariate_results = None
+    
+    if 'lasso_features' not in st.session_state:
+        st.session_state.lasso_features = None
+    
+    if 'correlation_heatmap' not in st.session_state:
+        st.session_state.correlation_heatmap = None
 
 
-# --- Enhanced Progress Tracking with ETA ---
+def register_cleanup():
+    """Register cleanup handlers for temporary files."""
+    import atexit
+    
+    def cleanup_temp_files():
+        """Clean up temporary directories on exit."""
+        if 'temp_output_dir' in st.session_state:
+            temp_dir = st.session_state.temp_output_dir
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception:
+                    pass
+    
+    atexit.register(cleanup_temp_files)
+
+
+# =============================================================================
+# PROGRESS TRACKING (Enhanced with ETA)
+# =============================================================================
 
 class ProgressTracker:
-    """Enhanced progress tracking with ETA calculation and streamlit integration"""
+    """
+    Enhanced progress tracker with ETA calculation and detailed logging.
+    Supports multi-ROI processing with per-ROI progress tracking.
+    """
     
-    def __init__(self, total_items: int, process_name: str = "Processing"):
+    def __init__(self, total_items: int, description: str = "Processing"):
+        """
+        Initialize progress tracker.
+        
+        Args:
+            total_items: Total number of items to process
+            description: Description of the task being tracked
+        """
         self.total_items = total_items
-        self.process_name = process_name
+        self.description = description
+        self.current_item = 0
         self.start_time = time.time()
-        self.completed_items = 0
-        self.progress_bar = None
-        self.progress_text = None
-        self.status_placeholder = None
-        self.eta_enabled = st.session_state.get('eta_enabled', True)
+        self.item_times = []
         
-    def setup_ui_elements(self, progress_bar, progress_text, status_placeholder):
-        """Setup UI elements for progress display"""
-        self.progress_bar = progress_bar
-        self.progress_text = progress_text
-        self.status_placeholder = status_placeholder
-        
-    def update(self, completed_items: int, current_item_name: str = ""):
-        """Update progress with ETA calculation"""
-        self.completed_items = completed_items
-        current_time = time.time()
-        elapsed_time = current_time - self.start_time
-        
-        progress = completed_items / self.total_items if self.total_items > 0 else 0
-        
-        if completed_items > 0 and self.eta_enabled:
-            # Calculate ETA
-            avg_time_per_item = elapsed_time / completed_items
-            remaining_items = self.total_items - completed_items
-            eta_seconds = remaining_items * avg_time_per_item
-            
-            # Format times
-            eta_str = self._format_time(eta_seconds)
-            elapsed_str = self._format_time(elapsed_time)
-            
-            # Update UI elements
-            if self.progress_bar:
-                self.progress_bar.progress(progress)
-            
-            if self.progress_text:
-                self.progress_text.text(
-                    f"{self.process_name}: {completed_items}/{self.total_items} "
-                    f"({progress*100:.1f}%) | Elapsed: {elapsed_str} | ETA: {eta_str}"
-                )
-            
-            if self.status_placeholder and current_item_name:
-                self.status_placeholder.info(f"🔄 {current_item_name} | ETA: {eta_str}")
-        else:
-            # Simple progress without ETA
-            if self.progress_bar:
-                self.progress_bar.progress(progress)
-            
-            if self.progress_text:
-                self.progress_text.text(
-                    f"{self.process_name}: {completed_items}/{self.total_items} ({progress*100:.1f}%)"
-                )
-            
-            if self.status_placeholder and current_item_name:
-                self.status_placeholder.info(f"🔄 {current_item_name}")
+        print(f"\n{'='*60}")
+        print(f"Starting: {description}")
+        print(f"Total items: {total_items}")
+        print(f"{'='*60}\n")
     
-    def _format_time(self, seconds: float) -> str:
-        """Format time in human-readable format"""
+    def update(self, current: int, message: str = ""):
+        """
+        Update progress and display status.
+        
+        Args:
+            current: Current item index (0-based)
+            message: Optional status message
+        """
+        self.current_item = current + 1
+        
+        # Calculate progress percentage
+        progress_pct = (self.current_item / self.total_items) * 100
+        
+        # Calculate ETA
+        elapsed_time = time.time() - self.start_time
+        if self.current_item > 0:
+            avg_time_per_item = elapsed_time / self.current_item
+            remaining_items = self.total_items - self.current_item
+            eta_seconds = avg_time_per_item * remaining_items
+            eta_str = self._format_time(eta_seconds)
+        else:
+            eta_str = "calculating..."
+        
+        # Display progress
+        status_line = f"[{self.current_item}/{self.total_items}] {progress_pct:.1f}% - ETA: {eta_str}"
+        if message:
+            status_line += f" - {message}"
+        
+        print(status_line)
+        
+        # Update UI progress if available
+        if st.session_state.get('ui_progress_bar'):
+            st.session_state['ui_progress_bar'].progress(progress_pct / 100)
+        
+        if st.session_state.get('ui_progress_text'):
+            st.session_state['ui_progress_text'].text(status_line)
+    
+    def complete(self, message: str = ""):
+        """
+        Mark task as complete and display summary.
+        
+        Args:
+            message: Optional completion message
+        """
+        elapsed_time = time.time() - self.start_time
+        elapsed_str = self._format_time(elapsed_time)
+        
+        print(f"\n{'='*60}")
+        print(f"✅ Complete: {self.description}")
+        print(f"Total time: {elapsed_str}")
+        print(f"Items processed: {self.current_item}/{self.total_items}")
+        if message:
+            print(f"Status: {message}")
+        print(f"{'='*60}\n")
+        
+        # Update UI
+        if st.session_state.get('ui_progress_bar'):
+            st.session_state['ui_progress_bar'].progress(1.0)
+        
+        if st.session_state.get('ui_progress_text'):
+            completion_msg = f"✅ {self.description} complete! ({elapsed_str})"
+            if message:
+                completion_msg += f" - {message}"
+            st.session_state['ui_progress_text'].text(completion_msg)
+    
+    @staticmethod
+    def _format_time(seconds: float) -> str:
+        """Format seconds into human-readable time string."""
         if seconds < 60:
-            return f"{int(seconds)}s"
+            return f"{seconds:.1f}s"
         elif seconds < 3600:
             minutes = int(seconds // 60)
-            seconds = int(seconds % 60)
-            return f"{minutes}m {seconds}s"
+            secs = int(seconds % 60)
+            return f"{minutes}m {secs}s"
         else:
             hours = int(seconds // 3600)
             minutes = int((seconds % 3600) // 60)
             return f"{hours}h {minutes}m"
-    
-    def complete(self, success_message: str = "Process completed"):
-        """Mark process as complete"""
-        total_time = time.time() - self.start_time
-        total_time_str = self._format_time(total_time)
-        
-        if self.progress_bar:
-            self.progress_bar.progress(1.0)
-        
-        if self.progress_text:
-            self.progress_text.text(f"✅ {success_message} | Total time: {total_time_str}")
-        
-        if self.status_placeholder:
-            self.status_placeholder.success(f"🎉 {success_message} | Completed in {total_time_str}")
 
 
-# --- File Type Detection and Validation ---
+# =============================================================================
+# FILE TYPE DETECTION AND VALIDATION
+# =============================================================================
 
 def detect_file_type(file_path: str) -> str:
     """
-    Detect if file is DICOM or NIfTI
+    Detect file type from extension.
+    
+    Args:
+        file_path: Path to file
     
     Returns:
-        'dicom', 'nifti', or 'unknown'
+        File type: 'nifti', 'dicom', or 'unknown'
     """
-    file_path = Path(file_path)
+    file_path = str(file_path).lower()
     
-    # Check by extension first
-    if file_path.suffix.lower() in ['.nii', '.nii.gz']:
+    if file_path.endswith(('.nii', '.nii.gz')):
         return 'nifti'
-    elif file_path.suffix.lower() in ['.dcm', '.ima', '.dicom']:
+    elif file_path.endswith(('.dcm', '.ima', '.dicom')):
         return 'dicom'
-    
-    # Try to read as DICOM
-    try:
-        pydicom.dcmread(str(file_path), stop_before_pixels=True)
-        return 'dicom'
-    except:
-        pass
-    
-    # Try to read as NIfTI
-    try:
-        sitk.ReadImage(str(file_path))
-        return 'nifti'
-    except:
-        pass
+    elif '.' not in os.path.basename(file_path):
+        # DICOM files sometimes have no extension
+        try:
+            import pydicom
+            pydicom.dcmread(file_path, stop_before_pixels=True)
+            return 'dicom'
+        except Exception:
+            pass
     
     return 'unknown'
 
 
-def validate_nifti_pair(image_path: str, mask_path: str) -> tuple:
+def validate_uploaded_files(uploaded_files) -> List[str]:
     """
-    Validate NIfTI image/mask pair
+    Validate uploaded files for common issues.
+    
+    Args:
+        uploaded_files: List of uploaded file objects from Streamlit
     
     Returns:
-        (is_valid, error_message)
+        List of validation issues (empty if all valid)
+    """
+    issues = []
+    
+    if not uploaded_files:
+        issues.append("No files uploaded")
+        return issues
+    
+    # Check file sizes
+    total_size = sum(file.size for file in uploaded_files)
+    max_size = 5 * 1024 * 1024 * 1024  # 5 GB
+    
+    if total_size > max_size:
+        issues.append(f"Total file size ({total_size / (1024**3):.2f} GB) exceeds maximum (5 GB)")
+    
+    # Check file types
+    valid_extensions = {'.dcm', '.ima', '.dicom', '.nii', '.nii.gz', '.zip'}
+    invalid_files = []
+    
+    for file in uploaded_files:
+        file_ext = Path(file.name).suffix.lower()
+        if file_ext not in valid_extensions and not file.name.lower().endswith('.nii.gz'):
+            invalid_files.append(file.name)
+    
+    if invalid_files:
+        issues.append(f"Invalid file types: {', '.join(invalid_files[:5])}")
+        if len(invalid_files) > 5:
+            issues.append(f"... and {len(invalid_files) - 5} more")
+    
+    return issues
+
+
+def validate_nifti_pair(image_path: str, mask_path: str) -> Tuple[bool, str]:
+    """
+    Validate NIfTI image/mask pair for compatibility.
+    
+    Args:
+        image_path: Path to image file
+        mask_path: Path to mask file
+    
+    Returns:
+        Tuple of (is_valid, error_message)
     """
     try:
-        # Load images
-        image_sitk = sitk.ReadImage(image_path)
-        mask_sitk = sitk.ReadImage(mask_path)
+        if not os.path.exists(image_path):
+            return False, f"Image file not found: {image_path}"
+        
+        if not os.path.exists(mask_path):
+            return False, f"Mask file not found: {mask_path}"
+        
+        # Read images
+        image = sitk.ReadImage(image_path)
+        mask = sitk.ReadImage(mask_path)
         
         # Check dimensions
-        if image_sitk.GetSize() != mask_sitk.GetSize():
-            return False, f"Size mismatch: Image {image_sitk.GetSize()} vs Mask {mask_sitk.GetSize()}"
+        if image.GetSize() != mask.GetSize():
+            return False, f"Dimension mismatch: image {image.GetSize()} vs mask {mask.GetSize()}"
         
         # Check spacing (allow small differences)
-        img_spacing = image_sitk.GetSpacing()
-        mask_spacing = mask_sitk.GetSpacing()
-        spacing_diff = max(abs(a - b) for a, b in zip(img_spacing, mask_spacing))
-        if spacing_diff > 0.1:
-            return False, f"Spacing mismatch: Image {img_spacing} vs Mask {mask_spacing}"
+        image_spacing = np.array(image.GetSpacing())
+        mask_spacing = np.array(mask.GetSpacing())
+        spacing_diff = np.abs(image_spacing - mask_spacing)
         
-        # Check mask content
-        mask_array = sitk.GetArrayFromImage(mask_sitk)
-        if not np.any(mask_array > 0):
-            return False, "Mask contains no positive voxels"
+        if np.any(spacing_diff > 0.1):
+            return False, f"Spacing mismatch: image {image_spacing} vs mask {mask_spacing}"
         
-        # Check for reasonable mask size
-        roi_voxel_count = np.sum(mask_array > 0)
-        total_voxel_count = mask_array.size
-        roi_percentage = (roi_voxel_count / total_voxel_count) * 100
+        # Check mask values
+        mask_array = sitk.GetArrayFromImage(mask)
+        unique_values = np.unique(mask_array)
         
-        if roi_percentage > 90:
-            return False, f"Mask covers {roi_percentage:.1f}% of image - may be inverted"
+        if len(unique_values) == 1 and unique_values[0] == 0:
+            return False, "Mask contains only zeros (empty mask)"
         
-        return True, "NIfTI pair validation passed"
+        # Check for reasonable mask values (should be binary or multi-label integers)
+        if not np.all((mask_array >= 0) & (mask_array == mask_array.astype(int))):
+            return False, "Mask contains invalid values (should be non-negative integers)"
+        
+        return True, "Valid pair"
         
     except Exception as e:
-        return False, f"Error validating NIfTI pair: {str(e)}"
+        return False, f"Validation error: {str(e)}"
 
 
-def organize_nifti_files(uploaded_files) -> str:
+# =============================================================================
+# NIFTI FILE ORGANIZATION
+# =============================================================================
+
+def organize_nifti_files(uploaded_files):
     """
-    Organize uploaded NIfTI files into patient directories
+    Organize uploaded NIfTI files into a structured directory.
+    
+    Args:
+        uploaded_files: List of uploaded file objects
     
     Returns:
-        Path to organized directory
+        Path to organized directory, or None if failed
     """
     try:
-        # Create temporary directory
         temp_dir = tempfile.mkdtemp(prefix="radiomics_nifti_upload_")
-        organized_path = os.path.join(temp_dir, "organized")
-        os.makedirs(organized_path, exist_ok=True)
         
-        # Group files by patient
-        patient_files = {}
-        
+        # Extract files
         for uploaded_file in uploaded_files:
-            filename = uploaded_file.name
+            file_path = os.path.join(temp_dir, uploaded_file.name)
             
-            # Extract patient ID from filename (various patterns)
-            if '_' in filename:
-                patient_id = filename.split('_')[0]
-            elif '-' in filename:
-                patient_id = filename.split('-')[0]
+            # Handle ZIP files
+            if uploaded_file.name.lower().endswith('.zip'):
+                import zipfile
+                with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
+                    zip_ref.extractall(temp_dir)
             else:
-                # Use filename without extension as patient ID
-                patient_id = Path(filename).stem.split('.')[0]
-            
+                # Regular file
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+        
+        # Organize by patient ID (inferred from filename patterns)
+        organized_dir = os.path.join(temp_dir, "organized")
+        os.makedirs(organized_dir, exist_ok=True)
+        
+        # Find all NIfTI files
+        nifti_files = []
+        for root, _, files in os.walk(temp_dir):
+            for file in files:
+                if detect_file_type(file) == 'nifti':
+                    nifti_files.append(os.path.join(root, file))
+        
+        # Group files by patient ID (extracted from filename)
+        patient_files = {}
+        for file_path in nifti_files:
+            patient_id = extract_patient_id_from_filename(Path(file_path).name)
             if patient_id not in patient_files:
                 patient_files[patient_id] = []
-            
-            # Save file to temp location
-            temp_file_path = os.path.join(temp_dir, filename)
-            with open(temp_file_path, 'wb') as f:
-                f.write(uploaded_file.getvalue())
-            
-            patient_files[patient_id].append({
-                'filename': filename,
-                'path': temp_file_path,
-                'type': detect_file_type(temp_file_path),
-                'is_mask': any(keyword in filename.lower() for keyword in ['mask', 'seg', 'roi', 'label'])
-            })
+            patient_files[patient_id].append(file_path)
         
-        # Organize into patient directories
+        # Copy files to organized structure
         for patient_id, files in patient_files.items():
-            patient_dir = os.path.join(organized_path, patient_id)
+            patient_dir = os.path.join(organized_dir, patient_id)
             os.makedirs(patient_dir, exist_ok=True)
             
-            for file_info in files:
-                dest_path = os.path.join(patient_dir, file_info['filename'])
-                shutil.copy(file_info['path'], dest_path)
+            for file_path in files:
+                shutil.copy(file_path, patient_dir)
         
-        return organized_path
+        return organized_dir
         
     except Exception as e:
-        st.error(f"Error organizing NIfTI files: {e}")
+        print(f"Error organizing NIfTI files: {e}")
         if 'temp_dir' in locals() and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         return None
 
 
-# --- Enhanced Modality Support ---
-
-def get_available_modalities_extended():
-    """Get extended list of supported modalities"""
-    return [
-        'CT', 'MR', 'PT', 'RTDOSE', 'REG', 'RTPLAN', 'SEG',
-        'MR_T1', 'MR_T2', 'MR_FLAIR', 'MR_DWI', 'PT_CT'
-    ]
-
-
-def get_available_modalities_extended():
-    """Get extended list of supported modalities"""
-    return [
-        'CT', 'MR', 'PT', 'RTDOSE', 'REG', 'RTPLAN', 'SEG',
-        'MR_T1', 'MR_T2', 'MR_FLAIR', 'MR_DWI', 'PT_CT'
-    ]
-
-
-def categorize_contours_extended(contour_list):
+def extract_patient_id_from_filename(filename: str) -> str:
     """
-    Enhanced contour categorization with comprehensive keywords for all modalities
+    Extract patient ID from filename using common patterns.
+    
+    Args:
+        filename: Name of file
+    
+    Returns:
+        Extracted patient ID, or "Unknown" if not found
     """
-    # Enhanced keywords for better categorization
-    target_keywords = [
-        'gtv', 'ctv', 'ptv', 'tumor', 'tumour', 'lesion', 'target', 'boost', 
-        'primary', 'nodal', 'cancer', 'malignant', 'mass', 'neoplasm',
-        'metastasis', 'met', 'recurrence', 'residual'
+    # Remove extension
+    name = Path(filename).stem
+    if name.endswith('.nii'):
+        name = name[:-4]
+    
+    # Common patterns
+    patterns = [
+        r'(Patient[-_]?\d+)',
+        r'(P\d+)',
+        r'(SUB[-_]?\d+)',
+        r'(\d{3,})',  # 3+ digit number
     ]
     
+    for pattern in patterns:
+        match = re.search(pattern, name, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    
+    # Fallback: use first part before underscore/dash
+    parts = re.split(r'[-_]', name)
+    if parts:
+        return parts[0]
+    
+    return "Unknown"
+
+
+# =============================================================================
+# ROI CATEGORIZATION AND MANAGEMENT (NEW - Multi-ROI Support)
+# =============================================================================
+
+def categorize_contours(contour_names: List[str]) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Categorize contours into Targets, OARs, and Other structures.
+    Original version with basic patterns.
+    
+    Args:
+        contour_names: List of ROI names
+    
+    Returns:
+        Tuple of (targets, oars, other)
+    """
+    targets = []
+    oars = []
+    other = []
+    
+    target_keywords = ['gtv', 'ctv', 'ptv', 'tumor', 'tumour', 'target', 'lesion', 'mass']
     oar_keywords = [
-        # Basic anatomy
-        'brain', 'stem', 'spinal', 'cord', 'heart', 'lung', 'liver', 'kidney',
-        'bladder', 'rectum', 'bowel', 'esophagus', 'esophageal', 'parotid', 
-        'eye', 'lens', 'optic', 'chiasm', 'cochlea', 'mandible', 'skin',
-        'femur', 'bone', 'muscle', 'nerve', 'vessel', 'artery', 'vein',
-        'stomach', 'duodenum', 'small_bowel', 'large_bowel', 'colon',
-        
-        # MRI-specific structures
-        'white_matter', 'gray_matter', 'grey_matter', 'csf', 'ventricle', 
-        'hippocampus', 'amygdala', 'thalamus', 'caudate', 'putamen', 
-        'corpus_callosum', 'cerebellum', 'frontal', 'parietal', 'temporal', 
-        'occipital', 'brainstem', 'midbrain', 'pons', 'medulla',
-        
-        # Head and neck specific
-        'thyroid', 'larynx', 'pharynx', 'tongue', 'oral_cavity', 'lips',
-        'teeth', 'jaw', 'maxilla', 'zygoma', 'temporal_bone',
-        
-        # Thoracic specific
-        'aorta', 'pulmonary', 'trachea', 'bronchus', 'mediastinum',
-        'pleura', 'rib', 'sternum', 'clavicle', 'scapula',
-        
-        # Abdominal specific
-        'pancreas', 'spleen', 'gallbladder', 'adrenal', 'diaphragm',
-        'peritoneum', 'mesentery', 'omentum',
-        
-        # Pelvic specific
-        'prostate', 'seminal_vesicle', 'uterus', 'cervix', 'ovary',
-        'vagina', 'vulva', 'penis', 'testis', 'sacrum', 'coccyx',
-        'ilium', 'ischium', 'pubis'
+        'brain', 'brainstem', 'spinal', 'cord', 'heart', 'lung', 'liver', 'kidney',
+        'bladder', 'rectum', 'bowel', 'stomach', 'parotid', 'submandibular',
+        'eye', 'lens', 'optic', 'chiasm', 'nerve', 'cochlea', 'mandible',
+        'esophagus', 'trachea', 'larynx', 'thyroid'
     ]
     
-    # PET-specific regions and uptake patterns
-    pet_structures = [
-        'uptake', 'metabolic', 'suv', 'fdg', 'avid', 'hot_spot',
-        'hypermetabolic', 'photopenic', 'cold', 'background'
-    ]
-    
-    # Combine all OAR keywords
-    all_oar_keywords = oar_keywords + pet_structures
-
-    targets, oars, other = [], [], []
-
-    for contour in contour_list:
-        contour_lower = contour.lower().replace(' ', '_').replace('-', '_')
-        is_target = any(keyword in contour_lower for keyword in target_keywords)
-        is_oar = any(keyword in contour_lower for keyword in all_oar_keywords)
-
-        if is_target:
+    for contour in contour_names:
+        contour_lower = contour.lower()
+        
+        if any(keyword in contour_lower for keyword in target_keywords):
             targets.append(contour)
-        elif is_oar:
+        elif any(keyword in contour_lower for keyword in oar_keywords):
             oars.append(contour)
         else:
             other.append(contour)
+    
+    return targets, oars, other
 
+
+def categorize_contours_extended(contour_names: List[str]) -> Tuple[List[str], List[str], List[str]]:
+    """
+    Enhanced contour categorization with more comprehensive patterns.
+    NEW: Extended for better multi-ROI classification.
+    
+    Args:
+        contour_names: List of ROI names
+    
+    Returns:
+        Tuple of (targets, oars, other)
+    """
+    targets = []
+    oars = []
+    other = []
+    
+    # Extended target keywords
+    target_keywords = [
+        'gtv', 'ctv', 'ptv', 'itv',  # Standard target volumes
+        'tumor', 'tumour', 'target', 'lesion', 'mass', 'nodal',  # General tumor
+        'primary', 'boost', 'cavity', 'bed',  # Treatment areas
+        'lymph.*node', 'ln', 'metastasis', 'met'  # Nodal/metastatic disease
+    ]
+    
+    # Extended OAR keywords with anatomical regions
+    oar_keywords = {
+        'cns': ['brain', 'brainstem', 'spinal.*cord', 'spinal.*canal', 'cerebellum', 'pons', 'medulla'],
+        'head_neck': ['parotid', 'submandibular', 'sublingual', 'pharynx', 'larynx', 'glottis', 
+                     'oral.*cavity', 'tongue', 'lips', 'mandible', 'tmj', 'masseter',
+                     'buccal', 'soft.*palate', 'hard.*palate'],
+        'vision': ['eye', 'lens', 'retina', 'optic.*nerve', 'optic.*chiasm', 'cornea', 'lacrimal'],
+        'hearing': ['cochlea', 'ear', 'vestibular', 'acoustic'],
+        'thorax': ['lung', 'heart', 'great.*vessel', 'aorta', 'vena.*cava', 'pulmonary',
+                  'esophagus', 'trachea', 'bronch', 'rib', 'clavicle', 'sternum'],
+        'abdomen': ['liver', 'stomach', 'bowel', 'duodenum', 'jejunum', 'ileum', 
+                   'colon', 'sigmoid', 'cecum', 'spleen', 'pancreas', 'gallbladder'],
+        'pelvis': ['bladder', 'rectum', 'anal.*canal', 'prostate', 'seminal.*vesicle',
+                  'uterus', 'cervix', 'vagina', 'ovary', 'testis', 'penis'],
+        'urinary': ['kidney', 'ureter', 'urethra'],
+        'bone': ['femur', 'femoral.*head', 'acetabulum', 'pelvis', 'sacrum', 'coccyx',
+                'vertebra', 'vertebrae', 'humerus', 'scapula'],
+        'vascular': ['carotid', 'jugular', 'subclavian', 'iliac', 'femoral.*artery'],
+        'glandular': ['thyroid', 'pituitary', 'adrenal', 'thymus'],
+        'skin': ['skin', 'dermis', 'epidermis'],
+        'muscle': ['muscle', 'constrictor', 'pterygoid', 'temporal']
+    }
+    
+    # Flatten OAR keywords
+    all_oar_keywords = []
+    for region_keywords in oar_keywords.values():
+        all_oar_keywords.extend(region_keywords)
+    
+    for contour in contour_names:
+        contour_lower = contour.lower().strip()
+        
+        # Check for targets (use regex for flexible matching)
+        is_target = False
+        for keyword in target_keywords:
+            if re.search(keyword, contour_lower):
+                is_target = True
+                break
+        
+        if is_target:
+            targets.append(contour)
+            continue
+        
+        # Check for OARs
+        is_oar = False
+        for keyword in all_oar_keywords:
+            if re.search(keyword, contour_lower):
+                is_oar = True
+                break
+        
+        if is_oar:
+            oars.append(contour)
+        else:
+            other.append(contour)
+    
     return sorted(targets), sorted(oars), sorted(other)
 
-# --- Original System and File Helpers (Enhanced) ---
 
-def check_system_resources():
+def get_available_modalities_extended(patient_data: Dict) -> Set[str]:
     """
-    Enhanced system resource checking with better error handling
+    Extract all available modalities from patient data.
+    
+    Args:
+        patient_data: Dictionary containing patient series data
+    
+    Returns:
+        Set of available modality strings
+    """
+    modalities = set()
+    
+    for patient_id, data in patient_data.items():
+        if isinstance(data, dict):
+            if 'available_modalities' in data:
+                modalities.update(data['available_modalities'])
+            
+            if 'series_data' in data:
+                modalities.update(data['series_data'].keys())
+    
+    return modalities
+
+
+def analyze_roi_availability(patient_contour_data: Dict, longitudinal_data: Dict = None) -> Dict:
+    """
+    Analyze ROI availability across patients and series.
+    NEW: For multi-ROI processing - helps identify which ROIs are available where.
+    
+    Args:
+        patient_contour_data: Dictionary of patient_id -> list of contours
+        longitudinal_data: Optional dictionary with per-series contour information
+    
+    Returns:
+        Dictionary with availability statistics
+    """
+    analysis = {
+        'total_patients': len(patient_contour_data),
+        'total_unique_rois': set(),
+        'roi_patient_count': {},  # roi_name -> count of patients having it
+        'roi_series_count': {},   # roi_name -> count of series having it (if longitudinal)
+        'patients_per_roi': {},   # roi_name -> list of patient_ids
+        'series_per_roi': {}      # roi_name -> list of (patient_id, series_info) tuples
+    }
+    
+    # Analyze patient-level availability
+    for patient_id, contours in patient_contour_data.items():
+        for contour in contours:
+            analysis['total_unique_rois'].add(contour)
+            
+            if contour not in analysis['roi_patient_count']:
+                analysis['roi_patient_count'][contour] = 0
+                analysis['patients_per_roi'][contour] = []
+            
+            analysis['roi_patient_count'][contour] += 1
+            analysis['patients_per_roi'][contour].append(patient_id)
+    
+    # Analyze series-level availability (if longitudinal data provided)
+    if longitudinal_data:
+        for patient_id, patient_long_data in longitudinal_data.items():
+            compatible_pairs = patient_long_data.get('compatible_pairs', [])
+            
+            for pair in compatible_pairs:
+                contours = pair.get('contours', [])
+                series_info = {
+                    'series_uid': pair.get('series_uid', ''),
+                    'modality': pair.get('modality', ''),
+                    'timepoint': pair.get('timepoint', '')
+                }
+                
+                for contour in contours:
+                    if contour not in analysis['roi_series_count']:
+                        analysis['roi_series_count'][contour] = 0
+                        analysis['series_per_roi'][contour] = []
+                    
+                    analysis['roi_series_count'][contour] += 1
+                    analysis['series_per_roi'][contour].append((patient_id, series_info))
+    
+    # Convert set to sorted list for easier use
+    analysis['total_unique_rois'] = sorted(list(analysis['total_unique_rois']))
+    
+    return analysis
+
+
+def find_common_rois_across_patients(patient_contour_data: Dict, min_availability: float = 0.8) -> List[str]:
+    """
+    Find ROIs that are available in most patients.
+    Useful for multi-ROI processing - helps select ROIs that will work for most patients.
+    
+    Args:
+        patient_contour_data: Dictionary of patient_id -> list of contours
+        min_availability: Minimum fraction of patients that must have the ROI (0.0 to 1.0)
+    
+    Returns:
+        List of commonly available ROI names
+    """
+    if not patient_contour_data:
+        return []
+    
+    roi_counts = {}
+    total_patients = len(patient_contour_data)
+    
+    for contours in patient_contour_data.values():
+        for contour in contours:
+            roi_counts[contour] = roi_counts.get(contour, 0) + 1
+    
+    min_patient_count = int(total_patients * min_availability)
+    common_rois = [roi for roi, count in roi_counts.items() if count >= min_patient_count]
+    
+    return sorted(common_rois)
+
+
+def generate_roi_summary_report(patient_contour_data: Dict, longitudinal_data: Dict = None) -> str:
+    """
+    Generate a text summary report of ROI availability.
+    Useful for displaying in UI.
+    
+    Args:
+        patient_contour_data: Dictionary of patient_id -> list of contours
+        longitudinal_data: Optional longitudinal data
+    
+    Returns:
+        Formatted text summary
+    """
+    analysis = analyze_roi_availability(patient_contour_data, longitudinal_data)
+    
+    report_lines = [
+        "="*60,
+        "ROI AVAILABILITY SUMMARY",
+        "="*60,
+        f"Total Patients: {analysis['total_patients']}",
+        f"Total Unique ROIs: {len(analysis['total_unique_rois'])}",
+        "",
+        "Top 10 Most Available ROIs:",
+        "-"*60
+    ]
+    
+    # Sort ROIs by availability
+    roi_availability = [(roi, count) for roi, count in analysis['roi_patient_count'].items()]
+    roi_availability.sort(key=lambda x: x[1], reverse=True)
+    
+    for i, (roi, count) in enumerate(roi_availability[:10], 1):
+        availability_pct = (count / analysis['total_patients']) * 100
+        report_lines.append(f"{i:2d}. {roi:30s} - {count:3d} patients ({availability_pct:5.1f}%)")
+    
+    if longitudinal_data:
+        report_lines.extend([
+            "",
+            "Series-Level Availability:",
+            "-"*60
+        ])
+        
+        total_series = sum(len(ld.get('compatible_pairs', [])) for ld in longitudinal_data.values())
+        report_lines.append(f"Total Series: {total_series}")
+        
+        # Top ROIs by series count
+        roi_series_sorted = [(roi, count) for roi, count in analysis['roi_series_count'].items()]
+        roi_series_sorted.sort(key=lambda x: x[1], reverse=True)
+        
+        for i, (roi, count) in enumerate(roi_series_sorted[:5], 1):
+            series_pct = (count / total_series) * 100 if total_series > 0 else 0
+            report_lines.append(f"{i:2d}. {roi:30s} - {count:3d} series ({series_pct:5.1f}%)")
+    
+    report_lines.append("="*60)
+    
+    return "\n".join(report_lines)
+
+
+# =============================================================================
+# SYSTEM RESOURCE MONITORING
+# =============================================================================
+
+def check_system_resources() -> Dict:
+    """
+    Check available system resources.
+    
+    Returns:
+        Dictionary with system resource information
     """
     try:
-        # Get memory information
         memory = psutil.virtual_memory()
-        available_ram_gb = memory.available / (1024**3)
-        
-        # Get CPU information
-        cpu_count = os.cpu_count()
-        
-        # Get disk space for temp directory
-        temp_dir = tempfile.gettempdir()
-        disk_usage = shutil.disk_usage(temp_dir)
-        available_disk_gb = disk_usage.free / (1024**3)
+        cpu_count = psutil.cpu_count()
         
         return {
-            'available_ram_gb': available_ram_gb,
-            'cpu_count': cpu_count,
+            'available_ram_gb': memory.available / (1024**3),
             'total_ram_gb': memory.total / (1024**3),
-            'used_ram_gb': memory.used / (1024**3),
-            'ram_percent': memory.percent,
-            'available_disk_gb': available_disk_gb,
-            'temp_dir': temp_dir
+            'ram_percent_used': memory.percent,
+            'cpu_count': cpu_count,
+            'cpu_percent': psutil.cpu_percent(interval=0.1)
         }
     except Exception as e:
-        # Return fallback values if there's an error
         return {
-            'available_ram_gb': 0.0,
+            'available_ram_gb': 0,
+            'total_ram_gb': 0,
+            'ram_percent_used': 0,
             'cpu_count': 1,
-            'total_ram_gb': 0.0,
-            'used_ram_gb': 0.0,
-            'ram_percent': 0.0,
-            'available_disk_gb': 0.0,
-            'temp_dir': tempfile.gettempdir(),
+            'cpu_percent': 0,
             'error': str(e)
         }
 
 
-def validate_uploaded_files(uploaded_files, max_file_size_mb=500, max_total_size_mb=2000):
+def estimate_memory_requirement(num_patients: int, roi_count: int = 1, 
+                               modality_count: int = 1) -> float:
     """
-    Enhanced file validation with format-specific checks
+    Estimate memory requirements for processing.
+    Useful for multi-ROI processing planning.
+    
+    Args:
+        num_patients: Number of patients to process
+        roi_count: Number of ROIs per patient
+        modality_count: Number of modalities per patient
+    
+    Returns:
+        Estimated memory requirement in GB
     """
-    total_size_mb = sum(len(file.getvalue()) for file in uploaded_files) / (1024 * 1024)
-    issues = []
+    # Rough estimates based on typical medical imaging data
+    avg_image_size_mb = 50  # Average CT/MR image size
+    avg_mask_size_mb = 10   # Average mask size
+    processing_overhead_factor = 3  # Processing requires multiple copies
     
-    if total_size_mb > max_total_size_mb:
-        issues.append(f"Total upload size ({total_size_mb:.1f} MB) exceeds the limit of {max_total_size_mb} MB.")
-
-    # Check individual files
-    for file in uploaded_files:
-        size_mb = len(file.getvalue()) / (1024 * 1024)
-        if size_mb > max_file_size_mb:
-            issues.append(f"File '{file.name}' ({size_mb:.1f} MB) exceeds the single file limit of {max_file_size_mb} MB.")
-        
-        # Format-specific validation
-        file_ext = Path(file.name).suffix.lower()
-        if file_ext in ['.nii', '.nii.gz']:
-            # NIfTI file validation
-            try:
-                # Could add more sophisticated NIfTI validation here
-                pass
-            except Exception as e:
-                issues.append(f"Invalid NIfTI file '{file.name}': {str(e)}")
-        elif file_ext in ['.dcm', '.ima', '.dicom']:
-            # DICOM file validation
-            try:
-                # Could add DICOM header validation here
-                pass
-            except Exception as e:
-                issues.append(f"Invalid DICOM file '{file.name}': {str(e)}")
+    base_requirement = (avg_image_size_mb + avg_mask_size_mb) * num_patients
+    multi_roi_factor = roi_count * modality_count
     
-    return issues
+    total_mb = base_requirement * multi_roi_factor * processing_overhead_factor
+    total_gb = total_mb / 1024
+    
+    return total_gb
 
 
-# --- Enhanced Cleanup Functions ---
+# =============================================================================
+# MULTI-ROI SESSION MANAGEMENT
+# =============================================================================
 
-def cleanup_temp_dirs():
+def create_multi_roi_session_id() -> str:
     """
-    Enhanced cleanup with better error handling and logging
+    Create unique session ID for multi-ROI processing.
+    Helps track which results belong to which multi-ROI processing run.
+    
+    Returns:
+        Unique session ID string
     """
-    print("Running enhanced cleanup...")
-    
-    # Clean up the main organized data directory
-    if st.session_state.get('uploaded_data_path') and 'radiomics_' in str(st.session_state.uploaded_data_path):
-        try:
-            shutil.rmtree(st.session_state.uploaded_data_path)
-            print(f"Cleaned up uploaded_data_path: {st.session_state.uploaded_data_path}")
-        except Exception as e:
-            print(f"Error cleaning up uploaded_data_path: {e}")
-            
-    # Clean up the NIfTI/processed output directory
-    if st.session_state.get('temp_output_dir') and os.path.exists(st.session_state.temp_output_dir):
-        try:
-            shutil.rmtree(st.session_state.temp_output_dir)
-            print(f"Cleaned up temp_output_dir: {st.session_state.temp_output_dir}")
-        except Exception as e:
-            print(f"Error cleaning up temp_output_dir: {e}")
-    
-    # Clean up any additional temporary directories
-    for key in ['nifti_temp_dir', 'extraction_temp_dir', 'analysis_temp_dir']:
-        if st.session_state.get(key) and os.path.exists(st.session_state[key]):
-            try:
-                shutil.rmtree(st.session_state[key])
-                print(f"Cleaned up {key}: {st.session_state[key]}")
-            except Exception as e:
-                print(f"Error cleaning up {key}: {e}")
+    import uuid
+    timestamp = int(time.time())
+    unique_id = str(uuid.uuid4())[:8]
+    return f"multi_roi_{timestamp}_{unique_id}"
 
 
-def register_cleanup():
+def save_multi_roi_session_info(session_id: str, roi_list: List[str], 
+                                patient_count: int, series_count: int = 0):
     """
-    Enhanced cleanup registration with session tracking
+    Save information about current multi-ROI processing session.
+    
+    Args:
+        session_id: Unique session ID
+        roi_list: List of ROIs being processed
+        patient_count: Number of patients
+        series_count: Number of series (for multi-series mode)
     """
-    if not st.session_state.get('cleanup_registered'):
-        atexit.register(cleanup_temp_dirs)
-        st.session_state['cleanup_registered'] = True
-        print("Enhanced cleanup function registered.")
-
-
-# --- Original Data-Specific Helpers (Enhanced) ---
-
-def categorize_contours(contour_list):
-    """
-    Original categorize_contours function with enhanced keywords
-    """
-    # Use enhanced version but maintain original function name for compatibility
-    return categorize_contours_extended(contour_list)
-
-
-def format_patient_summary(patient_info):
-    """
-    Enhanced patient information formatting with multi-modality support
-    """
-    summary = []
-    summary.append(f"**Patient ID:** {patient_info['patient_id']}")
-    
-    if 'modalities' in patient_info:
-        summary.append(f"**Available Modalities:** {', '.join(patient_info['modalities'])}")
-    
-    if 'timepoints' in patient_info:
-        summary.append(f"**Timepoints:** {len(patient_info['timepoints'])}")
-    
-    if 'imaging_series' in patient_info:
-        summary.append(f"**Imaging Series:** {len(patient_info['imaging_series'])}")
-    
-    if 'rtstruct_files' in patient_info:
-        summary.append(f"**RTSTRUCT Files:** {len(patient_info['rtstruct_files'])}")
-    
-    if 'compatible_pairs' in patient_info:
-        summary.append(f"**Compatible Pairs:** {len(patient_info['compatible_pairs'])}")
-    
-    if 'nifti_pairs' in patient_info:
-        summary.append(f"**NIfTI Pairs:** {len(patient_info['nifti_pairs'])}")
-    
-    if 'errors' in patient_info and patient_info['errors']:
-        summary.append(f"**Errors:** {len(patient_info['errors'])}")
-    
-    return "\n".join(summary)
-
-
-def calculate_processing_readiness(analysis):
-    """
-    Enhanced processing readiness with multi-format support
-    """
-    readiness = {
-        'patients_with_imaging': 0,
-        'patients_with_rtstruct': 0,
-        'patients_with_nifti_pairs': 0,
-        'patients_ready_for_processing': 0,
-        'modality_readiness': {},
-        'format_breakdown': {'dicom': 0, 'nifti': 0}
+    session_info = {
+        'session_id': session_id,
+        'timestamp': time.time(),
+        'roi_list': roi_list,
+        'roi_count': len(roi_list),
+        'patient_count': patient_count,
+        'series_count': series_count,
+        'total_combinations': patient_count * len(roi_list) * max(1, series_count)
     }
     
-    for patient_info in analysis.get('patients', {}).values():
-        if patient_info.get('imaging_series'):
-            readiness['patients_with_imaging'] += 1
-        
-        if patient_info.get('rtstruct_files'):
-            readiness['patients_with_rtstruct'] += 1
-        
-        if patient_info.get('nifti_pairs'):
-            readiness['patients_with_nifti_pairs'] += 1
-            readiness['format_breakdown']['nifti'] += 1
-        
-        if patient_info.get('compatible_pairs'):
-            readiness['patients_ready_for_processing'] += 1
-            readiness['format_breakdown']['dicom'] += 1
-            
-            # Count readiness by modality
-            for pair in patient_info['compatible_pairs']:
-                modality = pair.get('modality', 'Unknown')
-                if modality not in readiness['modality_readiness']:
-                    readiness['modality_readiness'][modality] = 0
-                readiness['modality_readiness'][modality] += 1
+    st.session_state['multi_roi_session_info'] = session_info
     
-    return readiness
+    return session_info
 
 
-# --- Enhanced Path and Directory Validation ---
+# =============================================================================
+# HELPER FUNCTIONS FOR MULTI-ROI RESULT AGGREGATION
+# =============================================================================
 
-def get_available_directories(base_paths=None):
-    """Enhanced directory scanning with better performance and error handling"""
-    if base_paths is None:
-        base_paths = ["/data", "/datasets", "/home", "/mnt", ".", os.path.expanduser("~")]
-    
-    available_dirs = set()
-    for base_path in base_paths:
-        if os.path.exists(base_path):
-            try:
-                # Limit scan depth and number of directories for performance
-                count = 0
-                for item in os.listdir(base_path):
-                    if count > 100:  # Limit to prevent performance issues
-                        break
-                    full_path = os.path.join(base_path, item)
-                    if os.path.isdir(full_path):
-                        available_dirs.add(full_path)
-                        count += 1
-            except PermissionError:
-                continue
-    return sorted(list(available_dirs))
-
-
-def validate_directory_path(path):
-    """Enhanced directory validation with format detection"""
-    if not path or not os.path.exists(path) or not os.path.isdir(path):
-        return ["Path is not a valid, existing directory."]
-    
-    issues = []
-    
-    # Check for supported file types
-    dicom_count = 0
-    nifti_count = 0
-    
-    try:
-        for root, _, files in os.walk(path):
-            for file in files[:50]:  # Limit check to first 50 files for performance
-                file_type = detect_file_type(os.path.join(root, file))
-                if file_type == 'dicom':
-                    dicom_count += 1
-                elif file_type == 'nifti':
-                    nifti_count += 1
-            
-            if dicom_count > 0 or nifti_count > 0:
-                break  # Found supported files, no need to continue
-    except Exception as e:
-        issues.append(f"Error scanning directory: {str(e)}")
-    
-    if dicom_count == 0 and nifti_count == 0:
-        issues.append("No supported files (DICOM or NIfTI) found in the specified directory.")
-    
-    return issues
-
-
-# --- Data Handling and Organization (Enhanced) ---
-
-def process_selected_path(selected_path):
+def aggregate_multi_roi_results(results_list: List[Tuple]) -> Tuple:
     """
-    Enhanced path processing with format detection
+    Aggregate results from multiple ROI processing calls.
+    Used by UI to combine results when processing multiple ROIs.
+    
+    Args:
+        results_list: List of (dataframe, summary_dict) tuples
+    
+    Returns:
+        Combined (dataframe, summary_dict)
     """
-    if not selected_path or not os.path.isdir(selected_path):
-        st.error("Invalid directory path provided.")
-        return None
-    return selected_path
-
-
-def organize_dicom_files(uploaded_files):
-    """
-    Enhanced DICOM file organization (preserving original logic)
-    """
-    try:
-        # Create a temporary directory to extract and organize files
-        temp_dir = tempfile.mkdtemp(prefix="radiomics_upload_")
-        extract_path = os.path.join(temp_dir, "extracted")
-        os.makedirs(extract_path, exist_ok=True)
-
-        # 1. Extract all uploaded files
-        for uploaded_file in uploaded_files:
-            if uploaded_file.name.lower().endswith('.zip'):
-                with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
-                    zip_ref.extractall(extract_path)
-            else:
-                with open(os.path.join(extract_path, uploaded_file.name), "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-
-        # 2. Walk through extracted files and organize them
-        organized_path = os.path.join(temp_dir, "organized")
-        os.makedirs(organized_path, exist_ok=True)
+    import pandas as pd
+    
+    all_dfs = []
+    combined_summary = {
+        'total_patients': 0,
+        'successful_patients': 0,
+        'failed_patients': {},
+        'recovery_statistics': {},
+        'roi_count': len(results_list)
+    }
+    
+    for df, summary in results_list:
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            all_dfs.append(df)
         
-        dicom_files = []
-        for root, _, files in os.walk(extract_path):
-            for file in files:
-                file_path = os.path.join(root, file)
-                try:
-                    pydicom.dcmread(file_path, stop_before_pixels=True)
-                    dicom_files.append(file_path)
-                except pydicom.errors.InvalidDicomError:
-                    continue # Skip non-DICOM files
-
-        if not dicom_files:
-            st.error("No valid DICOM files were found in the upload.")
-            shutil.rmtree(temp_dir)
-            return None
-
-        # Group by PatientID -> SeriesInstanceUID
-        patient_series_map = {}
-        for file_path in dicom_files:
-            dcm = pydicom.dcmread(file_path, stop_before_pixels=True)
-            patient_id = getattr(dcm, 'PatientID', 'UnknownPatient')
-            series_uid = getattr(dcm, 'SeriesInstanceUID', 'UnknownSeries')
+        if isinstance(summary, dict):
+            combined_summary['total_patients'] = max(
+                combined_summary['total_patients'],
+                summary.get('total_patients', 0)
+            )
+            combined_summary['successful_patients'] += summary.get('successful_patients', 0)
             
-            if patient_id not in patient_series_map:
-                patient_series_map[patient_id] = {}
-            if series_uid not in patient_series_map[patient_id]:
-                patient_series_map[patient_id][series_uid] = []
+            # Merge failed patients
+            for pid, info in summary.get('failed_patients', {}).items():
+                if pid not in combined_summary['failed_patients']:
+                    combined_summary['failed_patients'][pid] = info
             
-            patient_series_map[patient_id][series_uid].append(file_path)
+            # Merge recovery statistics
+            for key, val in summary.get('recovery_statistics', {}).items():
+                combined_summary['recovery_statistics'][key] = \
+                    combined_summary['recovery_statistics'].get(key, 0) + val
+    
+    if all_dfs:
+        combined_df = pd.concat(all_dfs, ignore_index=True)
+    else:
+        combined_df = pd.DataFrame()
+    
+    return combined_df, combined_summary
 
-        # 3. Create the organized directory structure and copy files
-        for patient_id, series_map in patient_series_map.items():
-            patient_dir = os.path.join(organized_path, str(patient_id))
-            for series_uid, files in series_map.items():
-                # Use modality for a more descriptive folder name
-                modality = getattr(pydicom.dcmread(files[0], stop_before_pixels=True), 'Modality', 'UN')
-                series_dir = os.path.join(patient_dir, f"{modality}_{series_uid[:8]}")
-                os.makedirs(series_dir, exist_ok=True)
-                for file_path in files:
-                    shutil.copy(file_path, series_dir)
-        
-        # Clean up the raw extracted files, leaving only the organized ones
-        shutil.rmtree(extract_path)
-        
-        return organized_path
-        
-    except Exception as e:
-        st.error(f"An error occurred during file organization: {e}")
-        if 'temp_dir' in locals() and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        return None
+
+# =============================================================================
+# END OF FILE
+# =============================================================================
