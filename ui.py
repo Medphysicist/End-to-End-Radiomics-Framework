@@ -32,6 +32,8 @@ try:
         scan_uploaded_data_for_contours_enhanced,
         preprocess_uploaded_data_enhanced,
         preprocess_nifti_data,
+        build_selection_plan_from_longitudinal_data,
+        preprocess_with_selection_plan,
         enhanced_modality_detection,
         get_supported_modalities
     )
@@ -496,6 +498,118 @@ def build_dicom_analysis_section():
         # Enhanced ROI selection
         build_enhanced_roi_selection()
 
+def _compute_advanced_selection_summary(selection_plan):
+    """Compute summary rows and totals for advanced selection display."""
+    rows = []
+    total_series = 0
+    total_roi_assignments = 0
+
+    for patient_id, patient_plan in (selection_plan.get('patients', {}) or {}).items():
+        selected_pairs = patient_plan.get('selected_pairs', [])
+        series_count = len(selected_pairs)
+        roi_count = sum(len(pair.get('rois', [])) for pair in selected_pairs)
+        total_series += series_count
+        total_roi_assignments += roi_count
+        rows.append({
+            'PatientID': patient_id,
+            'Selected series': series_count,
+            'Selected ROI assignments': roi_count
+        })
+
+    summary = {
+        'patients': len(selection_plan.get('patients', {})),
+        'series_total': total_series,
+        'roi_assignments_total': total_roi_assignments
+    }
+    return rows, summary
+
+
+def _build_advanced_search_ui():
+    """User-assisted advanced selection for patient/series/ROI."""
+    longitudinal_data = st.session_state.get('longitudinal_data', {}) or {}
+    if not longitudinal_data:
+        st.info("Run DICOM scan first to enable advanced search selection.")
+        return None, None
+
+    patient_ids = sorted(longitudinal_data.keys())
+
+    series_catalog = []
+    roi_catalog = set()
+
+    for patient_id, patient_longitudinal in longitudinal_data.items():
+        for pair in patient_longitudinal.get('compatible_pairs', []):
+            series_key = f"{pair.get('modality', 'Unknown')} | {pair.get('timepoint', 'TP_Unknown')} | {pair.get('series_description', '').strip()}"
+            series_catalog.append({'patient_id': patient_id, 'series_key': series_key, 'pair': pair})
+            roi_catalog.update(pair.get('contours', []) or [])
+
+    unique_series_keys = sorted({entry['series_key'] for entry in series_catalog})
+    roi_options = sorted(roi_catalog)
+
+    st.subheader("🔎 Advanced Search (User-Assisted)")
+    st.caption("Select from 3 boxes: Patient, Series, ROI/Structure. Then apply to all or selected patients.")
+
+    apply_scope = st.radio(
+        "Apply selection scope:",
+        ["Apply to all scanned patients", "Apply to selected patients only"],
+        horizontal=True,
+        key='advanced_apply_scope'
+    )
+
+    if apply_scope == "Apply to all scanned patients":
+        selected_patients = patient_ids
+    else:
+        selected_patients = st.multiselect(
+            "Box 1 — Patients",
+            options=patient_ids,
+            default=patient_ids,
+            key='advanced_selected_patients'
+        )
+
+    selected_series_keys = st.multiselect(
+        "Box 2 — Series",
+        options=unique_series_keys,
+        default=unique_series_keys,
+        key='advanced_selected_series_keys',
+        help="Supports selecting multiple series per patient"
+    )
+
+    selected_rois = st.multiselect(
+        "Box 3 — ROI / Structure",
+        options=roi_options,
+        default=roi_options[: min(len(roi_options), 5)] if roi_options else [],
+        key='advanced_selected_rois',
+        help="ROIs will be matched as corresponding structures within each selected series"
+    )
+
+    selection_plan = build_selection_plan_from_longitudinal_data(
+        longitudinal_data,
+        selected_patients,
+        selected_series_keys,
+        selected_rois
+    )
+
+    rows, summary = _compute_advanced_selection_summary(selection_plan)
+
+    st.session_state['advanced_selection_plan'] = selection_plan
+    st.session_state['advanced_selection_summary'] = summary
+
+    if rows:
+        st.write("**Advanced selection summary before preprocessing**")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    else:
+        st.warning("No patient/series/ROI combinations selected. Adjust the three selection boxes.")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Patients selected", summary['patients'])
+    with col2:
+        st.metric("Series selected", summary['series_total'])
+    with col3:
+        st.metric("ROI assignments", summary['roi_assignments_total'])
+
+    return selection_plan, summary
+
+
 def build_nifti_analysis_section():
     """NIfTI-specific analysis section"""
     st.header("Step 1.2: NIfTI Analysis - Image/Mask Pair Detection")
@@ -729,14 +843,14 @@ def build_enhanced_roi_selection():
 
         # Multi-series options
         if st.session_state.get('multi_series_mode', False):
-            st.info("🔄 Multi-series mode enabled - will process all selected modalities")
+            st.info("🔄 Multi-series mode enabled - supports multiple series + corresponding ROIs per patient")
 
             # Show selected series for processing
             if st.session_state.get('longitudinal_data'):
                 series_count = 0
                 for patient_longitudinal in st.session_state.longitudinal_data.values():
                     series_count += len(patient_longitudinal.get('compatible_pairs', []))
-                st.info(f"📊 Ready to process {series_count} series across {len(st.session_state.longitudinal_data)} patients")
+                st.info(f"📊 Found {series_count} compatible series across {len(st.session_state.longitudinal_data)} patients")
 
         preprocessing_col1, preprocessing_col2 = st.columns(2)
 
@@ -746,7 +860,7 @@ def build_enhanced_roi_selection():
             primary_modality = selected_modalities[0] if selected_modalities else 'CT'
 
             st.write(f"**Primary Modality:** {primary_modality}")
-            st.write(f"**Target ROI:** {selected_roi}")
+            st.write(f"**Default ROI (quick mode):** {selected_roi}")
 
             if len(selected_modalities) > 1:
                 st.write(f"**Additional Modalities:** {', '.join(selected_modalities[1:])}")
@@ -765,6 +879,21 @@ def build_enhanced_roi_selection():
                 help="Perform comprehensive validation of generated masks and images"
             )
 
+        advanced_mode = st.checkbox(
+            "Enable Advanced Search Selection",
+            value=st.session_state.get('multi_series_mode', False),
+            help="User-assisted 3-box workflow: Patient, Series, ROI/Structure"
+        )
+
+        selection_plan = None
+        selection_summary = None
+
+        if advanced_mode:
+            selection_plan, selection_summary = _build_advanced_search_ui()
+            st.session_state['use_advanced_selection'] = True
+        else:
+            st.session_state['use_advanced_selection'] = False
+
         # Start preprocessing
         if st.button("🚀 Start Enhanced Preprocessing", type="primary"):
             # Setup progress UI
@@ -781,15 +910,22 @@ def build_enhanced_roi_selection():
             st.session_state['ui_progress_text'] = progress_text
             st.session_state['ui_status_placeholder'] = status_placeholder
 
-            # Run enhanced preprocessing
-            if st.session_state.get('multi_series_mode', False):
-                # Multi-series preprocessing
+            if advanced_mode:
+                selection_plan = selection_plan or st.session_state.get('advanced_selection_plan', {})
+                if not selection_plan or not selection_plan.get('patients'):
+                    st.error("❌ No advanced selections found. Choose at least one patient, series, and ROI.")
+                    return
+
+                # Advanced multi-series + ROI preprocessing
+                result_df, processing_summary = preprocess_with_selection_plan(selection_plan)
+            elif st.session_state.get('multi_series_mode', False):
+                # Existing multi-series fallback behavior
                 result_df, processing_summary = preprocess_uploaded_data_enhanced(
                     st.session_state.uploaded_data_path,
                     selected_roi,
                     selected_modalities,
                     multi_series_mode=True,
-                    selected_series=[]  # This would be populated from longitudinal_data
+                    selected_series=[]
                 )
             else:
                 # Single-series preprocessing
@@ -803,7 +939,8 @@ def build_enhanced_roi_selection():
             st.session_state['processing_summary'] = processing_summary
 
             if not result_df.empty:
-                st.success(f"✅ Successfully preprocessed {len(result_df)} patients!")
+                unique_patients = result_df['patient_id'].nunique() if 'patient_id' in result_df.columns else len(result_df)
+                st.success(f"✅ Successfully preprocessed {unique_patients} patient(s) across {len(result_df)} selected ROI assignments!")
                 st.session_state.dataset_df = result_df
                 st.session_state.preprocessing_done = True
 
@@ -821,6 +958,55 @@ def build_tab2_feature_extraction():
         return
 
     st.header("Step 2: Enhanced Radiomics Feature Extraction")
+
+    # Pre-extraction summary from advanced selection/preprocessing
+    dataset_df = st.session_state.get('dataset_df', pd.DataFrame())
+    if dataset_df is not None and not dataset_df.empty:
+        st.subheader("📋 Selection Summary Before Extraction")
+        patients_count = dataset_df['patient_id'].nunique() if 'patient_id' in dataset_df.columns else len(dataset_df)
+
+        if 'series_uid' in dataset_df.columns:
+            series_per_patient = (
+                dataset_df.groupby('patient_id')['series_uid'].nunique().reset_index(name='series_count')
+                if 'patient_id' in dataset_df.columns else pd.DataFrame()
+            )
+        else:
+            series_per_patient = pd.DataFrame()
+
+        if {'patient_id', 'series_uid', 'roi_name'}.issubset(set(dataset_df.columns)):
+            roi_per_series = (
+                dataset_df.groupby(['patient_id', 'series_uid'])['roi_name']
+                .nunique()
+                .reset_index(name='roi_count')
+            )
+        elif 'roi_name' in dataset_df.columns and 'patient_id' in dataset_df.columns:
+            roi_per_series = (
+                dataset_df.groupby(['patient_id'])['roi_name']
+                .nunique()
+                .reset_index(name='roi_count')
+            )
+        else:
+            roi_per_series = pd.DataFrame()
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Patients", patients_count)
+        with col2:
+            total_series = int(series_per_patient['series_count'].sum()) if not series_per_patient.empty else patients_count
+            st.metric("Series total", total_series)
+        with col3:
+            total_rois = int(roi_per_series['roi_count'].sum()) if not roi_per_series.empty else 0
+            st.metric("ROI per series (total)", total_rois)
+
+        if not series_per_patient.empty:
+            st.write("**Series per patient**")
+            st.dataframe(series_per_patient, use_container_width=True)
+
+        if not roi_per_series.empty:
+            st.write("**ROI per series**")
+            st.dataframe(roi_per_series, use_container_width=True)
+
+        st.divider()
 
     # Enhanced configuration section
     build_enhanced_extraction_configuration()
