@@ -28,6 +28,7 @@ import cv2  # Added for specific OpenCV error handling
 from skimage import draw
 import scipy.ndimage as ndimage
 import time
+import re
 from typing import Dict, List, Tuple, Optional
 from utils import ProgressTracker, detect_file_type, validate_nifti_pair, organize_nifti_files
 
@@ -1067,6 +1068,315 @@ def _build_patient_preprocess_bundle_from_files(dicom_files, selected_modality):
 
 # --- NIFTI DATA PROCESSING ---
 
+
+
+def build_selection_plan_from_longitudinal_data(longitudinal_data, selected_patient_ids,
+                                                selected_series_descriptors, selected_roi_names):
+    """
+    Build a user-assisted selection plan from longitudinal scan metadata.
+
+    Returns:
+        dict with per-patient selected series and ROI mappings plus summary stats.
+    """
+    selected_patient_ids = set(selected_patient_ids or [])
+    selected_series_descriptors = set(selected_series_descriptors or [])
+    selected_roi_names = set(selected_roi_names or [])
+
+    plan = {
+        'patients': {},
+        'summary': {
+            'patients': 0,
+            'series_total': 0,
+            'roi_assignments_total': 0
+        }
+    }
+
+    for patient_id, patient_longitudinal in (longitudinal_data or {}).items():
+        if selected_patient_ids and patient_id not in selected_patient_ids:
+            continue
+
+        compatible_pairs = patient_longitudinal.get('compatible_pairs', []) or []
+        selected_pairs = []
+
+        for pair in compatible_pairs:
+            series_key = f"{pair.get('modality', 'Unknown')} | {pair.get('timepoint', 'TP_Unknown')} | {pair.get('series_description', '').strip()}"
+            if selected_series_descriptors and series_key not in selected_series_descriptors:
+                continue
+
+            available_contours = pair.get('contours', []) or []
+            if selected_roi_names:
+                roi_list = [roi for roi in available_contours if roi in selected_roi_names]
+            else:
+                roi_list = list(available_contours)
+
+            if not roi_list:
+                continue
+
+            selected_pairs.append({
+                'series_info': pair,
+                'series_key': series_key,
+                'rois': sorted(set(roi_list))
+            })
+
+        if not selected_pairs:
+            continue
+
+        plan['patients'][patient_id] = {
+            'selected_pairs': selected_pairs
+        }
+
+    plan['summary']['patients'] = len(plan['patients'])
+    plan['summary']['series_total'] = sum(len(p['selected_pairs']) for p in plan['patients'].values())
+    plan['summary']['roi_assignments_total'] = sum(
+        len(pair['rois'])
+        for patient in plan['patients'].values()
+        for pair in patient['selected_pairs']
+    )
+
+    return plan
+
+
+def preprocess_with_selection_plan(selection_plan):
+    """
+    Preprocess selected patient/series/ROI combinations from an advanced selection plan.
+    """
+    if not selection_plan or not selection_plan.get('patients'):
+        return pd.DataFrame(), {
+            'total_patients': 0,
+            'successful_patients': 0,
+            'failed_patients': {},
+            'series_processed': 0,
+            'roi_assignments_processed': 0,
+            'processing_mode': 'advanced_selection'
+        }
+
+    output_dir = tempfile.mkdtemp(prefix="radiomics_nifti_advanced_")
+    st.session_state['temp_output_dir'] = output_dir
+
+    dataset_records = []
+    failed_patients = {}
+
+    recovery_stats = {
+        'robust_rt_utils': 0,
+        'robust_sitk_skimage': 0,
+        'robust_enhanced_coord_transform': 0,
+        'robust_morphology_enhanced': 0,
+        'robust_direct_dicom': 0,
+        'alternative_roi': 0,
+        'fallback_placeholder': 0,
+        'conversion_rescued': 0,
+        'alternative_format_saved': 0,
+        'failed': 0
+    }
+
+    selected_units = []
+    for patient_id, patient_plan in selection_plan['patients'].items():
+        for selected_pair in patient_plan['selected_pairs']:
+            for roi_name in selected_pair['rois']:
+                selected_units.append((patient_id, selected_pair, roi_name))
+
+    total_units = len(selected_units)
+
+    progress_bar = st.session_state.get('ui_progress_bar')
+    progress_text = st.session_state.get('ui_progress_text')
+    status_placeholder = st.session_state.get('ui_status_placeholder')
+
+    for idx, (patient_id, selected_pair, target_roi_name) in enumerate(selected_units):
+        current_progress = (idx + 1) / max(total_units, 1)
+
+        if progress_bar:
+            progress_bar.progress(current_progress)
+        if progress_text:
+            progress_text.text(
+                f"Processing selection {idx+1}/{total_units}: {patient_id} | "
+                f"{selected_pair['series_info'].get('modality', 'Unknown')} | {target_roi_name}"
+            )
+        if status_placeholder:
+            status_placeholder.info(
+                f"🔄 Processing {patient_id} | {selected_pair['series_info'].get('modality', 'Unknown')} | {target_roi_name}"
+            )
+
+        series_info = selected_pair['series_info']
+        series_path = series_info.get('series_path')
+        rt_file = series_info.get('rtstruct_path')
+        selected_modality = series_info.get('modality', 'Unknown')
+
+        failure_key = f"{patient_id}::{series_info.get('series_uid', 'UnknownSeries')}::{target_roi_name}"
+
+        try:
+            rtstruct = RTStructBuilder.create_from(
+                dicom_series_path=series_path,
+                rt_struct_path=rt_file
+            )
+
+            actual_roi_name = None
+            for roi in rtstruct.get_roi_names():
+                if target_roi_name.lower() == roi.lower() or target_roi_name.lower() in roi.lower():
+                    actual_roi_name = roi
+                    break
+
+            if not actual_roi_name:
+                reason = f"Target contour '{target_roi_name}' not found in selected series"
+                failed_patients[failure_key] = {'reason': reason, 'details': f"Available contours: {rtstruct.get_roi_names()}"}
+                recovery_stats['failed'] += 1
+                continue
+
+            is_valid, validation_msg = validate_rtstruct_contours(rtstruct, actual_roi_name)
+            if not is_valid:
+                failed_patients[failure_key] = {'reason': f"ROI validation failed: {validation_msg}", 'details': validation_msg}
+                recovery_stats['failed'] += 1
+                continue
+
+            reader = sitk.ImageSeriesReader()
+            dicom_names = reader.GetGDCMSeriesFileNames(series_path)
+            if not dicom_names:
+                failed_patients[failure_key] = {'reason': 'No DICOM files found in selected series', 'details': f"Series path: {series_path}"}
+                recovery_stats['failed'] += 1
+                continue
+
+            reader.SetFileNames(dicom_names)
+            image_sitk = reader.Execute()
+
+            mask_3d, used_roi_name, recovery_method = ultimate_mask_recovery_robust(
+                rtstruct, actual_roi_name, image_sitk, series_path, patient_id, status_placeholder
+            )
+
+            if recovery_method and recovery_method in recovery_stats:
+                recovery_stats[recovery_method] += 1
+
+            if mask_3d is None:
+                similar_rois = find_similar_roi_names(rtstruct.get_roi_names(), target_roi_name)
+                for alt_roi, _, _ in similar_rois[:3]:
+                    alt_mask, alt_used_roi, alt_recovery_method = ultimate_mask_recovery_robust(
+                        rtstruct, alt_roi, image_sitk, series_path, patient_id, status_placeholder
+                    )
+                    if alt_mask is not None:
+                        mask_3d = alt_mask
+                        used_roi_name = alt_used_roi
+                        recovery_method = f"alternative_roi_{alt_recovery_method}"
+                        recovery_stats['alternative_roi'] += 1
+                        break
+
+            if mask_3d is None:
+                mask_3d = create_fallback_mask(image_sitk, patient_id, status_placeholder)
+                if mask_3d is not None:
+                    used_roi_name = f"{target_roi_name}_fallback"
+                    recovery_method = "fallback_placeholder"
+                    recovery_stats['fallback_placeholder'] += 1
+
+            if mask_3d is None or np.sum(mask_3d > 0) == 0:
+                failed_patients[failure_key] = {
+                    'reason': 'ULTIMATE MASK GENERATION FAILURE: All recovery methods failed',
+                    'details': f"Series: {series_info.get('series_uid', 'UnknownSeries')}"
+                }
+                recovery_stats['failed'] += 1
+                continue
+
+            mask_sitk, conversion_debug = robust_mask_to_sitk_conversion(mask_3d, image_sitk, patient_id, status_placeholder)
+            if mask_sitk is None:
+                failed_patients[failure_key] = {
+                    'reason': 'Failed to convert mask to SimpleITK format',
+                    'details': f"All conversion methods failed. Debug: {conversion_debug}"
+                }
+                recovery_stats['failed'] += 1
+                continue
+            elif any('_final_voxels' in key and key != 'standard_conversion_final_voxels' for key in conversion_debug):
+                recovery_stats['conversion_rescued'] += 1
+
+            patient_output_dir = os.path.join(output_dir, patient_id, str(series_info.get('series_uid', 'UnknownSeries')),
+                                              used_roi_name.replace(' ', '_'))
+            os.makedirs(patient_output_dir, exist_ok=True)
+
+            output_image_path = os.path.join(patient_output_dir, "image.nii.gz")
+            output_mask_path = os.path.join(patient_output_dir, "mask.nii.gz")
+
+            mask_size = mask_sitk.GetSize()
+            image_size = image_sitk.GetSize()
+            if mask_size != image_size:
+                mask_sitk, resampling_bypassed = bypass_resampling_when_possible(
+                    mask_sitk, image_sitk, patient_id, status_placeholder
+                )
+                if not resampling_bypassed:
+                    resampled_mask, final_voxels = smart_mask_resampling_with_coordinate_preservation(
+                        mask_3d, mask_sitk, image_sitk, patient_id, status_placeholder
+                    )
+                    if resampled_mask is None or final_voxels == 0:
+                        failed_patients[failure_key] = {
+                            'reason': 'Smart resampling failed - all coordinate alignment methods failed',
+                            'details': f"Original mask voxels: {int(np.sum(mask_3d > 0))}"
+                        }
+                        recovery_stats['failed'] += 1
+                        continue
+                    mask_sitk = resampled_mask
+                    recovery_stats['smart_resampling_rescued'] = recovery_stats.get('smart_resampling_rescued', 0) + 1
+
+            sitk.WriteImage(image_sitk, output_image_path)
+
+            mask_saved_successfully, final_voxel_count, actual_mask_path = robust_mask_file_saving(
+                mask_sitk, output_mask_path, patient_id, status_placeholder
+            )
+            if not mask_saved_successfully:
+                alt_mask_path, alt_voxel_count = alternative_mask_saving_formats(
+                    mask_3d, image_sitk, patient_output_dir, patient_id, status_placeholder
+                )
+                if alt_mask_path and alt_voxel_count > 0:
+                    actual_mask_path = alt_mask_path
+                    final_voxel_count = alt_voxel_count
+                    mask_saved_successfully = True
+                    recovery_stats['alternative_format_saved'] = recovery_stats.get('alternative_format_saved', 0) + 1
+
+            if not mask_saved_successfully or final_voxel_count == 0:
+                failed_patients[failure_key] = {
+                    'reason': 'ULTIMATE SAVING FAILURE: All saving methods failed or resulted in empty files',
+                    'details': f"Conversion debug: {conversion_debug}"
+                }
+                recovery_stats['failed'] += 1
+                continue
+
+            dataset_records.append({
+                'patient_id': patient_id,
+                'image_path': output_image_path,
+                'mask_path': actual_mask_path,
+                'roi_name': used_roi_name,
+                'modality': selected_modality,
+                'timepoint': series_info.get('timepoint', 'TP_Unknown'),
+                'series_uid': series_info.get('series_uid', 'UnknownSeries'),
+                'series_description': series_info.get('series_description', ''),
+                'study_date': series_info.get('study_date', ''),
+                'slice_count': series_info.get('slice_count', 0),
+                'recovery_method': recovery_method,
+                'original_roi_target': target_roi_name,
+                'needs_review': recovery_method != "robust_rt_utils",
+                'voxel_count': int(final_voxel_count)
+            })
+
+        except Exception as e:
+            failed_patients[failure_key] = {'reason': 'Critical processing error', 'details': str(e)}
+            recovery_stats['failed'] += 1
+            continue
+
+    if progress_bar:
+        progress_bar.progress(1.0)
+
+    result_df = pd.DataFrame(dataset_records)
+    total_patients = len(selection_plan.get('patients', {}))
+    successful_patients = result_df['patient_id'].nunique() if not result_df.empty else 0
+
+    processing_summary = {
+        'total_patients': total_patients,
+        'successful_patients': successful_patients,
+        'failed_patients': failed_patients,
+        'series_processed': result_df[['patient_id', 'series_uid']].drop_duplicates().shape[0] if not result_df.empty else 0,
+        'roi_assignments_processed': len(result_df),
+        'processing_mode': 'advanced_selection',
+        'recovery_statistics': recovery_stats,
+        'ultimate_methods_used': 5,
+        'rescue_rate': (sum(recovery_stats.values()) - recovery_stats['failed'] - recovery_stats['robust_rt_utils']) / max(len(selected_units), 1) * 100,
+        'conversion_rescue_rate': (recovery_stats['conversion_rescued'] / max(len(selected_units), 1)) * 100,
+        'saving_rescue_rate': (recovery_stats['alternative_format_saved'] / max(len(selected_units), 1)) * 100
+    }
+
+    return result_df, processing_summary
 def calculate_filename_similarity(filename1: str, filename2: str) -> float:
     """
     Calculate similarity score between two filenames for pairing

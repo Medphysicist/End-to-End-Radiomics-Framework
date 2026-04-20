@@ -70,7 +70,10 @@ def initialize_session_state():
         'nifti_pairs': {},              # NIfTI image/mask pairs
         'eta_enabled': True,            # Enable ETA calculations
         'processing_summary': {},       # Processing summary information
-        'extraction_summary': {}        # Extraction summary information
+        'extraction_summary': {},      # Extraction summary information
+        'use_advanced_selection': False, # Advanced patient/series/ROI selection enabled
+        'advanced_selection_plan': {},   # Selected patient/series/ROI mapping
+        'advanced_selection_summary': {} # Selection summary before extraction
     }
     
     for key, default_value in defaults.items():
