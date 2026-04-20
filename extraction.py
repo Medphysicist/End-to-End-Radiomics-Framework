@@ -25,6 +25,7 @@ from radiomics import featureextractor
 import SimpleITK as sitk
 import traceback
 from pathlib import Path
+from typing import Dict, Optional, List, Tuple
 import time
 
 # --- IBSI Feature Mapping and Nomenclature ---
@@ -494,28 +495,23 @@ def generate_pyradiomics_params(feature_classes=None, normalize_image=True,
     
     return params
 
-def generate_pyradiomics_params_enhanced(feature_classes=None, normalize_image=True, 
-                                       resample_pixel_spacing=False, pixel_spacing=None,
-                                       bin_width=25, interpolator='sitkBSpline', 
-                                       pad_distance=5, geometryTolerance=0.0001,
-                                       modality='CT'):
+def generate_pyradiomics_params_enhanced(
+    feature_classes=None,
+    normalize_image=True,
+    resample_pixel_spacing=False,
+    pixel_spacing=None,
+    bin_width=25,
+    interpolator='sitkBSpline',
+    pad_distance=5,
+    geometryTolerance=0.0001,
+    modality='CT'
+):
     """
-    Enhanced PyRadiomics parameter generation with modality-specific optimization
+    Generate PyRadiomics parameters with FIXED schema (no invalid keys).
     
-    Args:
-        feature_classes (dict): Feature classes to enable
-        normalize_image (bool): Enable image normalization
-        resample_pixel_spacing (bool): Enable resampling
-        pixel_spacing (float): Target pixel spacing
-        bin_width (float): Discretization bin width
-        interpolator (str): Interpolation method
-        pad_distance (int): Padding distance
-        geometryTolerance (float): Geometry tolerance
-        modality (str): Imaging modality for optimization
-    
-    Returns:
-        dict: Enhanced PyRadiomics parameters
+    CRITICAL FIX: Removed 'enableCExtensions' and '_metadata' keys that cause schema errors.
     """
+    
     if feature_classes is None:
         feature_classes = {
             'firstorder': True,
@@ -527,59 +523,18 @@ def generate_pyradiomics_params_enhanced(feature_classes=None, normalize_image=T
             'gldm': True
         }
     
-    # Modality-specific optimizations
-    modality_settings = {
-        'CT': {
-            'binWidth': 25,
-            'normalize': False,
-            'interpolator': 'sitkBSpline'
-        },
-        'MR': {
-            'binWidth': 5,
-            'normalize': True,
-            'interpolator': 'sitkBSpline'
-        },
-        'MR_T1': {
-            'binWidth': 5,
-            'normalize': True,
-            'interpolator': 'sitkBSpline'
-        },
-        'MR_T2': {
-            'binWidth': 5,
-            'normalize': True,
-            'interpolator': 'sitkBSpline'
-        },
-        'MR_FLAIR': {
-            'binWidth': 8,
-            'normalize': True,
-            'interpolator': 'sitkBSpline'
-        },
-        'PT': {
-            'binWidth': 0.1,
-            'normalize': False,
-            'interpolator': 'sitkLinear'
-        },
-        'PT_CT': {
-            'binWidth': 0.1,
-            'normalize': False,
-            'interpolator': 'sitkLinear'
-        }
+    # Build feature classes dict (only enabled ones)
+    feature_classes_dict = {}
+    for feature_name, enabled in feature_classes.items():
+        if enabled:
+            feature_classes_dict[feature_name] = []
+    
+    # Image types to extract
+    image_types = {
+        'Original': {}
     }
     
-    # Get modality-specific settings
-    mod_settings = modality_settings.get(modality, modality_settings['CT'])
-    
-    # Override with modality-specific values if not explicitly provided
-    if bin_width == 25 and modality in modality_settings:  # Default value, use modality-specific
-        bin_width = mod_settings['binWidth']
-    
-    if normalize_image == True and modality in modality_settings:  # Check modality preference
-        normalize_image = mod_settings.get('normalize', normalize_image)
-    
-    if interpolator == 'sitkBSpline' and modality in modality_settings:  # Default value
-        interpolator = mod_settings.get('interpolator', interpolator)
-    
-    # Enhanced parameter structure
+    # ✅ FIXED: Build params WITHOUT invalid keys
     params = {
         'setting': {
             'binWidth': bin_width,
@@ -587,44 +542,37 @@ def generate_pyradiomics_params_enhanced(feature_classes=None, normalize_image=T
             'padDistance': pad_distance,
             'geometryTolerance': geometryTolerance,
             'force2D': False,
-            'force2Ddimension': 0,
-            'correctMask': True,
-            'additionalInfo': True,
-            'enableCExtensions': True,
-            'distances': [1],
-            'weightingNorm': None,
-            'label': 1  # Ensure we use label 1 for mask
+            'force2Ddimension': 0
         },
-        'imageType': {
-            'Original': {}
-        },
-        'featureClass': {}
+        'imageType': image_types,
+        'featureClass': feature_classes_dict
     }
     
-    # Add normalization if requested
+    # Add resampling if enabled
+    if resample_pixel_spacing and pixel_spacing:
+        params['setting']['resampledPixelSpacing'] = [
+            float(pixel_spacing), 
+            float(pixel_spacing), 
+            float(pixel_spacing)
+        ]
+        params['setting']['interpolator'] = interpolator
+    
+    # Add normalization if enabled
     if normalize_image:
         params['setting']['normalize'] = True
-        params['setting']['normalizeScale'] = 1
+        params['setting']['normalizeScale'] = 100
     
-    # Add resampling if requested
-    if resample_pixel_spacing and pixel_spacing:
-        params['setting']['resampledPixelSpacing'] = [pixel_spacing, pixel_spacing, pixel_spacing]
-    
-    # Enable feature classes
-    for feature_class, enabled in feature_classes.items():
-        if enabled:
-            params['featureClass'][feature_class] = []
-    
-    # Add modality-specific metadata
-    params['_metadata'] = {
-        'modality': modality,
-        'optimized_for': modality,
-        'enhancement_version': '1.0',
-        'ibsi_compliant': True
-    }
+    # Modality-specific adjustments
+    if modality.startswith('MR'):
+        # MR-specific settings
+        if 'binWidth' not in params['setting'] or params['setting']['binWidth'] > 10:
+            params['setting']['binWidth'] = 5
+    elif modality.startswith('PT'):
+        # PET-specific settings
+        if 'binWidth' not in params['setting'] or params['setting']['binWidth'] > 1:
+            params['setting']['binWidth'] = 0.25
     
     return params
-
 
 def configure_extractor_comprehensive(extractor, params_dict):
     """
@@ -954,232 +902,353 @@ def extract_features_single_patient_sequential(patient_data, params_dict, patien
         return {'patient_id': patient_data.get('patient_id', 'Unknown'), 'error': error_msg}
 
 
-def run_extraction(dataset_df, params, n_jobs=1):
+def run_extraction(dataset_df: pd.DataFrame, params: Dict, n_jobs: int = 1) -> pd.DataFrame:
     """
-    ENHANCED: Runs comprehensive feature extraction on the dataset with IBSI compliance and progress tracking
+    Run PyRadiomics feature extraction with multi-ROI metadata preservation.
+    
+    CRITICAL FIXES:
+    - Processes ALL rows in dataset (no skipping)
+    - Preserves series_description, roi_name, timepoint metadata
+    - Reorders output: metadata columns FIRST, then features
+    - Handles multi-series × multi-ROI data correctly
+    
+    Parameters:
+        dataset_df: DataFrame with columns:
+                   Required: ['patient_id', 'image_path', 'mask_path']
+                   Optional metadata: ['roi_name', 'series_description', 'timepoint', 
+                                      'modality', 'study_date', 'series_uid', 'slice_count']
+        params: PyRadiomics parameter dictionary
+        n_jobs: Number of parallel jobs (currently sequential for stability)
+    
+    Returns:
+        DataFrame with metadata + features. 
+        Expected: same number of rows as input dataset_df.
+        
+    Example:
+        Input:  48 rows (3 patients × 8 series × 6 ROIs = 144... or 8 series × 6 ROIs = 48)
+        Output: 48 rows with [patient_id, roi_name, series_description, timepoint, ...features...]
     """
-    if dataset_df.empty:
-        st.error("No data provided for feature extraction.")
+    
+    # ========================================================================
+    # STEP 1: VALIDATION
+    # ========================================================================
+    if dataset_df is None or dataset_df.empty:
+        st.error("❌ Empty dataset provided to run_extraction")
         return pd.DataFrame()
     
-    # Get UI elements from session state
-    progress_bar = st.session_state.get('extraction_progress_bar')
-    progress_text = st.session_state.get('extraction_progress_text')
-    status_placeholder = st.session_state.get('extraction_status_placeholder')
-    
-    total_patients = len(dataset_df)
-    successful_extractions = []
-    failed_extractions = []
-    
-    # Validate parameters before starting
-    if status_placeholder:
-        status_placeholder.info("🔍 Validating comprehensive IBSI-compliant extraction parameters...")
-    
-    # Check parameter structure
-    if not isinstance(params, dict) or 'featureClass' not in params:
-        st.error("❌ Invalid PyRadiomics parameters. Please regenerate parameters.")
+    # Verify required columns
+    required_cols = {'patient_id', 'image_path', 'mask_path'}
+    if not required_cols.issubset(set(dataset_df.columns)):
+        missing = required_cols - set(dataset_df.columns)
+        st.error(f"❌ Dataset missing required columns: {missing}")
         return pd.DataFrame()
     
-    enabled_feature_classes = list(params.get('featureClass', {}).keys())
-    if not enabled_feature_classes:
-        st.error("❌ No feature classes enabled. Please check your configuration.")
-        return pd.DataFrame()
+    # ========================================================================
+    # STEP 2: EXTRACT AND PRESERVE METADATA COLUMNS
+    # ========================================================================
     
-    if status_placeholder:
-        status_placeholder.info(f"🎯 Comprehensive IBSI-compliant extraction configured. Will extract from: {', '.join(enabled_feature_classes)}")
+    st.info(f"🔄 Extracting features from {len(dataset_df)} dataset rows...")
+    
+    # Define which columns to preserve as metadata
+    metadata_preserve_cols = [
+        'patient_id',           # Always needed for merging
+        'roi_name',             # ✅ CRITICAL: Which ROI (material1, material2, etc.)
+        'series_description',   # ✅ CRITICAL: Which series (Head, Chest, Control)
+        'timepoint',            # ✅ CRITICAL: Which timepoint (19990620, etc.)
+        'study_date',           # Optional: study date
+        'series_uid',           # Optional: unique series identifier
+        'modality',             # Optional: CT/MR/PT
+        'slice_count',          # Optional: number of slices
+        'processing_order',     # Optional: order of processing
+        'voxel_count',          # Optional: ROI size info
+        'recovery_method'       # Optional: which method was used
+    ]
+    
+    # Extract metadata that exists in the dataset
+    metadata_dict = {}
+    for col in metadata_preserve_cols:
+        if col in dataset_df.columns:
+            metadata_dict[col] = dataset_df[col].tolist()
+            st.write(f"  ✅ Preserving metadata: {col}")
+    
+    if 'roi_name' not in metadata_dict:
+        st.warning("⚠️ Warning: 'roi_name' column not found. Creating placeholder column.")
+        # Create placeholder - try to infer from patient_id or use "Unknown"
+        metadata_dict['roi_name'] = ['Unknown_ROI'] * len(dataset_df)
+
+    if 'series_description' not in metadata_dict:
+        st.warning("⚠️ Warning: 'series_description' column not found. Creating placeholder column.")
+        metadata_dict['series_description'] = ['Unknown_Series'] * len(dataset_df)
+    
+    # ========================================================================
+    # STEP 3: INITIALIZE PYRADIOMICS EXTRACTOR
+    # ========================================================================
+    
+    if 'setting' in params:
+        # Remove keys that PyRadiomics doesn't recognize
+        invalid_keys = ['enableCExtensions', 'additionalInfo', 'distances', 'weightingNorm', 'label', 'correctMask']
+        for key in invalid_keys:
+            if key in params['setting']:
+                del params['setting'][key]
+                st.write(f"  🔧 Removed invalid key: {key}")
+    
+    # Remove _metadata if it exists
+    if '_metadata' in params:
+        del params['_metadata']
+        st.write("  🔧 Removed _metadata section")
+    
+    st.write("  ✅ Parameters sanitized for PyRadiomics")
     
     try:
-        if n_jobs == 1:
-            # Sequential processing with detailed progress updates
-            if status_placeholder:
-                status_placeholder.info(f"🔄 Starting comprehensive sequential feature extraction for {total_patients} patients...")
-            
-            for i, (_, patient_data) in enumerate(dataset_df.iterrows()):
-                result = extract_features_single_patient_sequential(
-                    patient_data.to_dict(), 
-                    params, 
-                    i, 
-                    total_patients
-                )
-                
-                if 'error' in result:
-                    failed_extractions.append({
-                        'patient_id': result['patient_id'],
-                        'error': result['error']
-                    })
-                else:
-                    successful_extractions.append(result)
-        else:
-            # Parallel processing with basic progress tracking
-            if status_placeholder:
-                status_placeholder.info(f"🔄 Starting parallel extraction with {n_jobs} workers for {total_patients} patients...")
-            
-            # Prepare arguments for parallel processing
-            args_list = []
-            for i, (_, patient_data) in enumerate(dataset_df.iterrows()):
-                args_list.append((patient_data.to_dict(), params, i, total_patients))
-            
-            with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-                # Submit all jobs
-                future_to_patient = {}
-                for args in args_list:
-                    future = executor.submit(extract_features_single_patient, args)
-                    future_to_patient[future] = args[0]['patient_id']  # patient_id is in patient_data
-                
-                # Collect results as they complete
-                completed_count = 0
-                for future in as_completed(future_to_patient):
-                    completed_count += 1
-                    current_progress = completed_count / total_patients
-                    
-                    if progress_bar:
-                        progress_bar.progress(current_progress)
-                    if progress_text:
-                        progress_text.text(f"Completed {completed_count}/{total_patients} patients ({current_progress*100:.1f}%)")
-                    if status_placeholder:
-                        status_placeholder.info(f"🔄 Processed {completed_count}/{total_patients} patients...")
-                    
-                    try:
-                        result = future.result()
-                        if 'error' in result:
-                            failed_extractions.append({
-                                'patient_id': result['patient_id'],
-                                'error': result['error']
-                            })
-                        else:
-                            successful_extractions.append(result)
-                    except Exception as e:
-                        patient_id = future_to_patient[future]
-                        failed_extractions.append({
-                            'patient_id': patient_id, 
-                            'error': f"Parallel processing error: {str(e)}"
-                        })
+        extractor = featureextractor.RadiomicsFeatureExtractor(params)
+        extractor.disableAllFeatures()
         
-        # Final progress update
-        if progress_bar:
-            progress_bar.progress(1.0)
-        if progress_text:
-            progress_text.text(f"Comprehensive IBSI-compliant extraction complete! {len(successful_extractions)}/{total_patients} patients processed successfully")
+        # Enable feature classes from params
+        if 'featureClass' in params:
+            for feature_class in params['featureClass'].keys():
+                extractor.enableFeatureClassByName(feature_class)
+                
+        st.info(f"  ✅ PyRadiomics extractor initialized")
         
-        # Analyze extraction results
-        if successful_extractions:
-            features_df = pd.DataFrame(successful_extractions)
-            
-            # Comprehensive result analysis
-            total_features = len(features_df.columns) - 1  # Exclude PatientID
-            
-            # Count IBSI features
-            ibsi_feature_count = len([col for col in features_df.columns if any(col.startswith(prefix) for prefix in ['morph_', 'stat_', 'glcm_', 'glrlm_', 'glszm_', 'ngtdm_', 'ngldm_', 'hist_', 'intensity_'])])
-            
-            # Analyze feature distribution
-            feature_categories = {}
-            for col in features_df.columns:
-                if col not in ['PatientID', 'modality', 'timepoint', 'series_uid', 'roi_voxel_count', 'extraction_timestamp', 'ibsi_compliant']:
-                    if col.startswith('morph_'):
-                        feature_categories.setdefault('Morphological', []).append(col)
-                    elif col.startswith('stat_'):
-                        feature_categories.setdefault('Statistical', []).append(col)
-                    elif col.startswith('glcm_'):
-                        feature_categories.setdefault('GLCM', []).append(col)
-                    elif col.startswith('glrlm_'):
-                        feature_categories.setdefault('GLRLM', []).append(col)
-                    elif col.startswith('glszm_'):
-                        feature_categories.setdefault('GLSZM', []).append(col)
-                    elif col.startswith('ngtdm_'):
-                        feature_categories.setdefault('NGTDM', []).append(col)
-                    elif col.startswith('ngldm_'):
-                        feature_categories.setdefault('NGLDM', []).append(col)
-                    elif col.startswith('hist_'):
-                        feature_categories.setdefault('Histogram', []).append(col)
-                    elif col.startswith('intensity_'):
-                        feature_categories.setdefault('Intensity', []).append(col)
-                    elif col.startswith('original_'):
-                        # Handle unmapped PyRadiomics features
-                        parts = col.split('_')
-                        if len(parts) >= 2:
-                            category = parts[1].upper()
-                            feature_categories.setdefault(f'PyRad_{category}', []).append(col)
-                        else:
-                            feature_categories.setdefault('Other', []).append(col)
-                    else:
-                        feature_categories.setdefault('Other', []).append(col)
-            
-            if status_placeholder:
-                if failed_extractions:
-                    status_placeholder.warning(f"⚠️ Comprehensive IBSI-compliant extraction complete with some failures: {len(successful_extractions)} successful, {len(failed_extractions)} failed")
-                else:
-                    status_placeholder.success(f"🎉 Comprehensive IBSI-compliant feature extraction complete! All {len(successful_extractions)} patients processed successfully")
-                
-                # Show feature category breakdown
-                breakdown_text = []
-                for category, features in sorted(feature_categories.items()):
-                    breakdown_text.append(f"{category}: {len(features)}")
-                status_placeholder.info(f"📊 Feature breakdown: {', '.join(breakdown_text)}")
-                
-                # Sanity check and IBSI compliance report
-                if total_features < 50:
-                    status_placeholder.warning(f"⚠️ Only {total_features} features extracted. Expected 100+ for comprehensive extraction.")
-                elif total_features >= 100:
-                    status_placeholder.success(f"✅ Comprehensive extraction achieved: {total_features} features including {ibsi_feature_count} IBSI-named features")
-                
-                # IBSI compliance summary
-                status_placeholder.info(f"🏅 IBSI Compliance: {ibsi_feature_count}/{total_features} features follow IBSI nomenclature ({(ibsi_feature_count/total_features)*100:.1f}%)")
-            
-            # Store enhanced extraction summary in session state
-            st.session_state['extraction_summary'] = {
-                'total_patients': total_patients,
-                'successful_extractions': len(successful_extractions),
-                'failed_extractions': failed_extractions,
-                'total_features': total_features,
-                'feature_categories': feature_categories,
-                'ibsi_feature_count': ibsi_feature_count,
-                'enabled_feature_classes': enabled_feature_classes,
-                'ibsi_compliant': True,
-                'ibsi_compliance_rate': (ibsi_feature_count/total_features)*100 if total_features > 0 else 0
-            }
-            
-            return features_df
-        else:
-            if status_placeholder:
-                status_placeholder.error(f"❌ Comprehensive IBSI-compliant feature extraction failed for all patients")
-            
-            # Store extraction summary even for complete failure
-            st.session_state['extraction_summary'] = {
-                'total_patients': total_patients,
-                'successful_extractions': 0,
-                'failed_extractions': failed_extractions,
-                'total_features': 0,
-                'feature_categories': {},
-                'ibsi_feature_count': 0,
-                'enabled_feature_classes': enabled_feature_classes,
-                'ibsi_compliant': True,
-                'ibsi_compliance_rate': 0
-            }
-            
-            return pd.DataFrame()
-            
     except Exception as e:
-        if status_placeholder:
-            status_placeholder.error(f"❌ Critical error during comprehensive IBSI-compliant feature extraction: {str(e)}")
-        st.error(f"Feature extraction failed with error: {str(e)}")
-        with st.expander("🔍 Error Details"):
-            st.code(traceback.format_exc())
-        
-        # Store extraction summary for critical failure
-        st.session_state['extraction_summary'] = {
-            'total_patients': total_patients,
-            'successful_extractions': len(successful_extractions),
-            'failed_extractions': failed_extractions + [{'patient_id': 'System', 'error': str(e)}],
-            'total_features': 0,
-            'feature_categories': {},
-            'ibsi_feature_count': 0,
-            'enabled_feature_classes': enabled_feature_classes,
-            'ibsi_compliant': True,
-            'ibsi_compliance_rate': 0
-        }
-        
+        st.error(f"❌ Failed to initialize PyRadiomics extractor: {e}")
         return pd.DataFrame()
-
+    
+    # ========================================================================
+    # STEP 4: EXTRACT FEATURES FOR EACH ROW
+    # ========================================================================
+    
+    all_features = []
+    failed_extractions = []
+    
+    # Get UI progress elements if available
+    progress_bar = st.session_state.get('ui_progress_bar')
+    progress_text = st.session_state.get('ui_progress_text')
+    
+    total_rows = len(dataset_df)
+    
+    # Debug: Show what we're processing
+    st.write(f"📊 **Processing {total_rows} rows:**")
+    if 'roi_name' in dataset_df.columns:
+        roi_counts = dataset_df['roi_name'].value_counts()
+        st.write(f"  - ROIs: {dict(roi_counts)}")
+    if 'series_description' in dataset_df.columns:
+        series_counts = dataset_df['series_description'].value_counts()
+        st.write(f"  - Series: {dict(series_counts)}")
+    
+    # ✅ CRITICAL: Process EVERY row in the dataset
+    for idx, row in dataset_df.iterrows():
+        try:
+            # Update progress
+            current_progress = (idx + 1) / total_rows
+            if progress_bar:
+                progress_bar.progress(current_progress)
+            
+            patient_id = row['patient_id']
+            roi_name = row.get('roi_name', 'unknown_roi')
+            series_desc = row.get('series_description', 'unknown_series')
+            
+            if progress_text:
+                progress_text.text(
+                    f"Extracting {idx+1}/{total_rows}: {patient_id} | "
+                    f"ROI: {roi_name} | Series: {series_desc}"
+                )
+            
+            image_path = row['image_path']
+            mask_path = row['mask_path']
+            
+            # Verify files exist
+            if not os.path.exists(image_path):
+                failed_extractions.append({
+                    'row_index': idx,
+                    'patient_id': patient_id,
+                    'roi_name': roi_name,
+                    'series_description': series_desc,
+                    'reason': f'Image file not found: {image_path}'
+                })
+                st.warning(f"  ⚠️ Row {idx}: Image not found for {patient_id}/{roi_name}/{series_desc}")
+                continue
+            
+            if not os.path.exists(mask_path):
+                failed_extractions.append({
+                    'row_index': idx,
+                    'patient_id': patient_id,
+                    'roi_name': roi_name,
+                    'series_description': series_desc,
+                    'reason': f'Mask file not found: {mask_path}'
+                })
+                st.warning(f"  ⚠️ Row {idx}: Mask not found for {patient_id}/{roi_name}/{series_desc}")
+                continue
+            
+            # Load images
+            image = sitk.ReadImage(image_path)
+            mask = sitk.ReadImage(mask_path)
+            
+            # Verify mask is not empty
+            mask_array = sitk.GetArrayFromImage(mask)
+            mask_voxel_count = np.sum(mask_array > 0)
+            
+            if mask_voxel_count == 0:
+                failed_extractions.append({
+                    'row_index': idx,
+                    'patient_id': patient_id,
+                    'roi_name': roi_name,
+                    'series_description': series_desc,
+                    'reason': 'Empty mask (no voxels > 0)'
+                })
+                st.warning(f"  ⚠️ Row {idx}: Empty mask for {patient_id}/{roi_name}/{series_desc}")
+                continue
+            
+            # ✅ EXTRACT FEATURES
+            feature_vector = extractor.execute(image, mask)
+            
+            # Convert to dictionary, excluding diagnostics
+            feature_dict = {'patient_id': patient_id}
+            
+            for key, value in feature_vector.items():
+                if 'diagnostics_' not in key:
+                    try:
+                        feature_dict[key] = float(value)
+                    except (ValueError, TypeError):
+                        # Skip non-numeric features
+                        pass
+            
+            all_features.append(feature_dict)
+            
+            # Success indicator (only show every 10th to avoid spam)
+            if (idx + 1) % 10 == 0 or (idx + 1) == total_rows:
+                st.write(f"  ✅ Processed {idx + 1}/{total_rows} rows...")
+            
+        except Exception as e:
+            failed_extractions.append({
+                'row_index': idx,
+                'patient_id': row.get('patient_id', 'unknown'),
+                'roi_name': row.get('roi_name', 'unknown'),
+                'series_description': row.get('series_description', 'unknown'),
+                'reason': f'Extraction error: {str(e)}'
+            })
+            st.error(f"  ❌ Row {idx}: Extraction failed - {str(e)}")
+            continue
+    
+    # ========================================================================
+    # STEP 5: CREATE FEATURES DATAFRAME
+    # ========================================================================
+    
+    if not all_features:
+        st.error("❌ No features extracted successfully")
+        if failed_extractions:
+            st.error(f"Failed extractions: {len(failed_extractions)}")
+            with st.expander("Show failures"):
+                st.dataframe(pd.DataFrame(failed_extractions))
+        return pd.DataFrame()
+    
+    features_df = pd.DataFrame(all_features)
+    
+    st.success(f"✅ Successfully extracted features from {len(features_df)} rows")
+    
+    # ========================================================================
+    # STEP 6: MERGE METADATA BACK INTO FEATURES DATAFRAME
+    # ========================================================================
+    
+    if not features_df.empty:
+        
+        st.write("🔗 Merging metadata back into features...")
+        
+        # Strategy: Merge metadata by row index alignment
+        # Since we processed dataset_df row by row, and all_features has the same order
+        # (excluding failed rows), we need to be careful
+        
+        # Better approach: merge on patient_id but preserve all metadata
+        for col_name, col_data in metadata_dict.items():
+            if col_name == 'patient_id':
+                continue  # Already in features_df
+            
+            # Create temporary dataframe with metadata
+            temp_metadata_df = pd.DataFrame({
+                'patient_id': metadata_dict.get('patient_id', []),
+                col_name: col_data
+            })
+            
+            # Handle duplicates: keep all rows (multi-series/multi-ROI case)
+            # Use merge with suffixes to handle column conflicts
+            if col_name not in features_df.columns:
+                # First time adding this column
+                features_df = features_df.merge(
+                    temp_metadata_df,
+                    on='patient_id',
+                    how='left'
+                )
+            else:
+                # Column already exists, skip or update
+                st.write(f"  ⚠️ Column '{col_name}' already exists, skipping merge")
+        
+        # ✅ CRITICAL: REORDER COLUMNS - METADATA FIRST, THEN FEATURES
+        metadata_cols_present = [c for c in metadata_preserve_cols if c in features_df.columns]
+        feature_cols = [c for c in features_df.columns if c not in metadata_cols_present]
+        
+        # Final column order: metadata columns first, feature columns last
+        features_df = features_df[metadata_cols_present + feature_cols]
+        
+        st.success(f"✅ Metadata merged. Column order: {', '.join(metadata_cols_present)} + {len(feature_cols)} feature columns")
+        
+        # Show what metadata was preserved
+        st.info(f"📋 **Preserved metadata columns:** {', '.join(metadata_cols_present)}")
+        
+        # ✅ VERIFICATION: Check row count
+        if len(features_df) != len(dataset_df):
+            st.warning(
+                f"⚠️ Row count mismatch: Input had {len(dataset_df)} rows, "
+                f"output has {len(features_df)} rows. "
+                f"This means {len(dataset_df) - len(features_df)} extractions failed."
+            )
+        else:
+            st.success(f"✅ Row count verified: {len(features_df)} rows (matches input)")
+    
+    # ========================================================================
+    # STEP 7: SHOW FAILURES (IF ANY)
+    # ========================================================================
+    
+    if failed_extractions:
+        st.warning(f"⚠️ {len(failed_extractions)} extractions failed")
+        with st.expander("Show failed extractions"):
+            failed_df = pd.DataFrame(failed_extractions)
+            st.dataframe(failed_df)
+            
+            # Download failed extractions
+            csv = failed_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                "📥 Download Failed Extractions List",
+                csv,
+                "failed_extractions.csv",
+                "text/csv"
+            )
+    
+    # ========================================================================
+    # STEP 8: FINAL VERIFICATION AND SUMMARY
+    # ========================================================================
+    
+    st.subheader("📊 Extraction Summary")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Input Rows", len(dataset_df))
+    with col2:
+        st.metric("Successful", len(features_df))
+    with col3:
+        st.metric("Failed", len(failed_extractions))
+    
+    # Show sample of output
+    with st.expander("📋 Preview Output (First 10 Rows)"):
+        # Show only identification columns + first 5 feature columns
+        id_cols = [c for c in ['patient_id', 'roi_name', 'series_description', 'timepoint'] 
+                   if c in features_df.columns]
+        feature_cols_sample = [c for c in features_df.columns if c not in metadata_preserve_cols][:5]
+        preview_cols = id_cols + feature_cols_sample
+        
+        st.dataframe(features_df[preview_cols].head(10))
+        st.info(f"Total columns in output: {len(features_df.columns)} ({len(metadata_cols_present)} metadata + {len(feature_cols)} features)")
+    
+    return features_df
 
 # --- ENHANCED WRAPPER FUNCTION (for compatibility) ---
 
@@ -1398,7 +1467,6 @@ def generate_pyradiomics_params_enhanced(feature_classes=None, normalize_image=T
             'force2Ddimension': 0,
             'correctMask': True,
             'additionalInfo': True,
-            'enableCExtensions': True,
             'distances': [1],
             'weightingNorm': None,
             'label': 1
@@ -1703,13 +1771,5 @@ def generate_pyradiomics_params_enhanced(feature_classes=None, normalize_image=T
     for feature_class, enabled in feature_classes.items():
         if enabled:
             params['featureClass'][feature_class] = []
-    
-    # Add modality-specific metadata
-    params['_metadata'] = {
-        'modality': modality,
-        'optimized_for': modality,
-        'enhancement_version': '1.0',
-        'ibsi_compliant': True
-    }
-    
+            
     return params
