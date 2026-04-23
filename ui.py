@@ -1185,6 +1185,91 @@ def _series_label(s):
     return label
 
 
+def _render_series_availability(selected_patients, series_rows):
+    """
+    Diagnostic panel: show every physical series the scanner found in each
+    selected patient folder, and flag those that do NOT have a compatible
+    RTSTRUCT pair. Series without a compatible RTSTRUCT do not appear in
+    Advanced Search's three boxes, which is the usual reason a patient
+    folder with multiple physical series gets reduced to a single series.
+
+    Data sources:
+        series_rows         -> RTSTRUCT-compatible series (one row per pair)
+        longitudinal_data   -> all physical series the scanner walked through,
+                               compatible or not, under
+                               longitudinal_data[pid]['series_data']
+    """
+    longitudinal = st.session_state.get('longitudinal_data', {}) or {}
+    if not longitudinal:
+        return
+
+    compat_keys = {
+        (s['patient_id'], s.get('series_uid', '')) for s in series_rows
+    }
+
+    rows = []
+    incompat_total = 0
+    for pid in selected_patients:
+        patient_long = longitudinal.get(pid, {}) or {}
+        series_data = patient_long.get('series_data', {}) or {}
+        if not series_data:
+            continue
+        for modality, timepoints in series_data.items():
+            for tp, series_map in (timepoints or {}).items():
+                for uid, info in (series_map or {}).items():
+                    is_compat = (pid, uid) in compat_keys
+                    if not is_compat:
+                        incompat_total += 1
+                    rows.append({
+                        'Patient': pid,
+                        'Modality': modality,
+                        'Timepoint': tp,
+                        'Series Description': info.get('series_description') or 'Unknown_Series',
+                        'Slices': info.get('slice_count', 0),
+                        'Series Path': info.get('path', ''),
+                        'Status': '✅ Has RTSTRUCT' if is_compat else '⚠️ No compatible RTSTRUCT',
+                        'SeriesInstanceUID': uid,
+                    })
+
+    if not rows:
+        return
+
+    total = len(rows)
+    compat_count = total - incompat_total
+
+    with st.expander(
+        f"🩻 Series availability for selected patient(s): "
+        f"{compat_count}/{total} compatible, {incompat_total} hidden",
+        expanded=(incompat_total > 0)
+    ):
+        st.caption(
+            "This table lists every physical image series the scanner found in "
+            "the selected patient folder(s). Rows marked '⚠️ No compatible "
+            "RTSTRUCT' are NOT offered in the boxes below — usually because "
+            "the series' FrameOfReferenceUID does not match the RTSTRUCT, or "
+            "because no RTSTRUCT was drawn on that series."
+        )
+        avail_df = pd.DataFrame(rows)
+        st.dataframe(
+            avail_df[['Patient', 'Modality', 'Series Description', 'Timepoint',
+                      'Slices', 'Status']],
+            use_container_width=True
+        )
+        if incompat_total > 0:
+            st.warning(
+                f"{incompat_total} series are present on disk but have no "
+                "compatible RTSTRUCT, so they will not be processed by Advanced "
+                "Search. To include them:\n\n"
+                "• Supply an RTSTRUCT whose FrameOfReferenceUID matches each "
+                "such series (usually means drawing / re-registering contours "
+                "on that series), OR\n"
+                "• Re-register the image series so they share a single "
+                "FrameOfReferenceUID with the existing RTSTRUCT, OR\n"
+                "• Process those series in a separate pass with their own "
+                "RTSTRUCT file."
+            )
+
+
 def build_advanced_search_section():
     """
     Advanced Search workflow - user-assisted Patient/Series/ROI selection.
@@ -1292,17 +1377,31 @@ def build_advanced_search_section():
 
     selected_series_descriptions = []
     if series_mode.startswith("Match by series description"):
-        default_desc = series_descriptions[:1] if series_descriptions else []
+        # Default to ALL descriptions so multi-series phantoms (e.g. Chest + Control)
+        # are included by default. The user can narrow it down afterwards.
+        default_desc = list(series_descriptions)
         selected_series_descriptions = st.multiselect(
             "Series descriptions to include:",
             options=series_descriptions,
             default=default_desc,
             key="adv_series_descriptions",
-            help="Pick one or more series descriptions. Every matching series is processed."
+            help=(
+                "Pick one or more series descriptions. Every matching series is "
+                "processed. Defaults to all descriptions found in the scan so "
+                "patients with multiple series (e.g. Chest + Control) are not "
+                "silently reduced to one."
+            )
         )
         if not selected_series_descriptions:
             st.warning("Select at least one series description.")
             return
+
+    # ---- Series availability diagnostic ------------------------------------
+    # Show every physical series the scanner found per selected patient,
+    # including series that had NO compatible RTSTRUCT (and therefore do NOT
+    # appear in the three boxes above). This is the most common reason a
+    # patient folder with 2+ series ends up processed as a single series.
+    _render_series_availability(selected_patients, series_rows)
 
     # Apply series filters
     def _series_passes_filters(s):
