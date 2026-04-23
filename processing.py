@@ -1937,6 +1937,294 @@ def preprocess_uploaded_data_enhanced(
         combined_summary.update(result_summary if isinstance(result_summary, dict) else {})
         return result_df, combined_summary
 
+
+# =============================================================================
+# ADVANCED SEARCH PREPROCESSING (USER-ASSISTED PATIENT / SERIES / ROI SELECTION)
+# =============================================================================
+
+def preprocess_selected_combinations(combinations, output_dir=None):
+    """
+    Process an explicit list of user-assembled (patient, series, ROI) combinations.
+
+    Each combination is a dict describing a single unit of work for the robust
+    mask generation pipeline. This is used by the "Advanced Search" workflow
+    where the user has already categorized the scanned data into three boxes
+    (patients, series, ROIs) and asked to apply the selection to all patients
+    or to a selected subset.
+
+    Required keys per combination:
+        - patient_id (str)
+        - series_path (str): directory containing the DICOM image series
+        - rtstruct_path (str): path to RTSTRUCT DICOM file
+        - roi_name (str): ROI name to process
+
+    Optional keys per combination (propagated to the output dataset):
+        - modality, timepoint, series_uid, series_description, study_date,
+          slice_count
+
+    Returns:
+        (pd.DataFrame, summary_dict)
+        DataFrame contains one row per successfully processed combination
+        with columns compatible with the rest of the pipeline:
+        patient_id, image_path, mask_path, roi_name, series_description,
+        modality, series_uid, timepoint, recovery_method, needs_review,
+        voxel_count, original_roi_target.
+    """
+    if output_dir is None:
+        output_dir = tempfile.mkdtemp(prefix="radiomics_advanced_")
+    os.makedirs(output_dir, exist_ok=True)
+    st.session_state['temp_output_dir'] = output_dir
+
+    dataset_records = []
+    failed_combinations = {}
+    recovery_stats = {
+        'robust_rt_utils': 0,
+        'robust_sitk_skimage': 0,
+        'robust_enhanced_coord_transform': 0,
+        'robust_morphology_enhanced': 0,
+        'robust_direct_dicom': 0,
+        'alternative_roi': 0,
+        'fallback_placeholder': 0,
+        'alternative_format_saved': 0,
+        'failed': 0
+    }
+
+    total = len(combinations)
+    progress_bar = st.session_state.get('ui_progress_bar')
+    progress_text = st.session_state.get('ui_progress_text')
+    status_placeholder = st.session_state.get('ui_status_placeholder')
+
+    patients_seen = set()
+
+    for idx, combo in enumerate(combinations):
+        patient_id = combo.get('patient_id', f'patient_{idx}')
+        series_path = combo.get('series_path')
+        rtstruct_path = combo.get('rtstruct_path')
+        roi_name = combo.get('roi_name')
+        modality = combo.get('modality', 'CT')
+        series_uid = combo.get('series_uid', '')
+        series_description = combo.get('series_description', 'Unknown_Series')
+        timepoint = combo.get('timepoint', '')
+        study_date = combo.get('study_date', '')
+        slice_count = combo.get('slice_count', 0)
+
+        combo_key = f"{patient_id}|{series_uid or series_description}|{roi_name}"
+        patients_seen.add(patient_id)
+
+        try:
+            current_progress = (idx + 1) / max(1, total)
+            if progress_bar:
+                progress_bar.progress(current_progress)
+            if progress_text:
+                progress_text.text(
+                    f"Processing {idx+1}/{total}: {patient_id} / "
+                    f"{series_description or series_uid or 'series'} / ROI={roi_name}"
+                )
+            if status_placeholder:
+                status_placeholder.info(
+                    f"🔄 [{idx+1}/{total}] {patient_id} - series '{series_description}' - ROI '{roi_name}'"
+                )
+
+            if not series_path or not os.path.isdir(series_path):
+                failed_combinations[combo_key] = {'reason': 'Invalid or missing series_path'}
+                recovery_stats['failed'] += 1
+                continue
+            if not rtstruct_path or not os.path.isfile(rtstruct_path):
+                failed_combinations[combo_key] = {'reason': 'Invalid or missing rtstruct_path'}
+                recovery_stats['failed'] += 1
+                continue
+            if not roi_name:
+                failed_combinations[combo_key] = {'reason': 'No ROI name provided'}
+                recovery_stats['failed'] += 1
+                continue
+
+            try:
+                rtstruct = RTStructBuilder.create_from(
+                    dicom_series_path=series_path,
+                    rt_struct_path=rtstruct_path
+                )
+            except Exception as e:
+                failed_combinations[combo_key] = {
+                    'reason': 'RTSTRUCT/series pair incompatible',
+                    'details': str(e)
+                }
+                recovery_stats['failed'] += 1
+                continue
+
+            available_rois = rtstruct.get_roi_names()
+            actual_roi_name = None
+            for roi in available_rois:
+                if roi == roi_name or roi_name.lower() == roi.lower():
+                    actual_roi_name = roi
+                    break
+            if actual_roi_name is None:
+                for roi in available_rois:
+                    if roi_name.lower() in roi.lower():
+                        actual_roi_name = roi
+                        break
+            if actual_roi_name is None:
+                failed_combinations[combo_key] = {
+                    'reason': f"ROI '{roi_name}' not found in RTSTRUCT",
+                    'details': f"Available: {available_rois}"
+                }
+                recovery_stats['failed'] += 1
+                continue
+
+            is_valid, validation_msg = validate_rtstruct_contours(rtstruct, actual_roi_name)
+            if not is_valid:
+                failed_combinations[combo_key] = {'reason': f"ROI validation failed: {validation_msg}"}
+                recovery_stats['failed'] += 1
+                continue
+
+            reader = sitk.ImageSeriesReader()
+            dicom_names = reader.GetGDCMSeriesFileNames(series_path)
+            if not dicom_names:
+                failed_combinations[combo_key] = {'reason': 'No DICOM files in series path'}
+                recovery_stats['failed'] += 1
+                continue
+            reader.SetFileNames(dicom_names)
+            image_sitk = reader.Execute()
+
+            mask_3d, used_roi_name, recovery_method = ultimate_mask_recovery_robust(
+                rtstruct, actual_roi_name, image_sitk, series_path, patient_id, status_placeholder
+            )
+            if recovery_method and recovery_method in recovery_stats:
+                recovery_stats[recovery_method] += 1
+
+            if mask_3d is None:
+                similar_rois = find_similar_roi_names(available_rois, roi_name)
+                for alt_roi, _, _ in similar_rois[:3]:
+                    alt_mask, alt_used_roi, alt_recovery_method = ultimate_mask_recovery_robust(
+                        rtstruct, alt_roi, image_sitk, series_path, patient_id, status_placeholder
+                    )
+                    if alt_mask is not None:
+                        mask_3d = alt_mask
+                        used_roi_name = alt_used_roi
+                        recovery_method = f"alternative_roi_{alt_recovery_method}"
+                        recovery_stats['alternative_roi'] += 1
+                        break
+
+            if mask_3d is None:
+                mask_3d = create_fallback_mask(image_sitk, patient_id, status_placeholder)
+                if mask_3d is not None:
+                    recovery_method = 'fallback_placeholder'
+                    used_roi_name = f"{roi_name}_fallback"
+                    recovery_stats['fallback_placeholder'] += 1
+
+            if mask_3d is None or np.sum(mask_3d > 0) == 0:
+                failed_combinations[combo_key] = {'reason': 'Mask generation failed (all methods)'}
+                recovery_stats['failed'] += 1
+                continue
+
+            mask_sitk, conversion_debug = robust_mask_to_sitk_conversion(
+                mask_3d, image_sitk, patient_id, status_placeholder
+            )
+            if mask_sitk is None:
+                failed_combinations[combo_key] = {
+                    'reason': 'Mask conversion to SITK failed',
+                    'details': conversion_debug
+                }
+                recovery_stats['failed'] += 1
+                continue
+
+            # Distinct output dir per (patient, series, ROI)
+            safe_series = (series_description or series_uid or 'series').replace('/', '_').replace(' ', '_')[:40]
+            safe_roi = (used_roi_name or roi_name).replace('/', '_').replace(' ', '_')[:40]
+            combo_output_dir = os.path.join(output_dir, patient_id, f"{safe_series}__{safe_roi}")
+            os.makedirs(combo_output_dir, exist_ok=True)
+            output_image_path = os.path.join(combo_output_dir, "image.nii.gz")
+            output_mask_path = os.path.join(combo_output_dir, "mask.nii.gz")
+
+            try:
+                if mask_sitk.GetSize() != image_sitk.GetSize():
+                    mask_sitk, bypassed = bypass_resampling_when_possible(
+                        mask_sitk, image_sitk, patient_id, status_placeholder
+                    )
+                    if not bypassed:
+                        resampled_mask, final_voxels = smart_mask_resampling_with_coordinate_preservation(
+                            mask_3d, mask_sitk, image_sitk, patient_id, status_placeholder
+                        )
+                        if resampled_mask is None or final_voxels == 0:
+                            failed_combinations[combo_key] = {'reason': 'Smart resampling failed'}
+                            recovery_stats['failed'] += 1
+                            continue
+                        mask_sitk = resampled_mask
+            except Exception as e:
+                failed_combinations[combo_key] = {'reason': 'Dimension handling error', 'details': str(e)}
+                recovery_stats['failed'] += 1
+                continue
+
+            try:
+                sitk.WriteImage(image_sitk, output_image_path)
+            except Exception as e:
+                failed_combinations[combo_key] = {'reason': 'Image saving failed', 'details': str(e)}
+                recovery_stats['failed'] += 1
+                continue
+
+            mask_saved_successfully, final_voxel_count, actual_mask_path = robust_mask_file_saving(
+                mask_sitk, output_mask_path, patient_id, status_placeholder
+            )
+            if not mask_saved_successfully:
+                alt_mask_path, alt_voxel_count = alternative_mask_saving_formats(
+                    mask_3d, image_sitk, combo_output_dir, patient_id, status_placeholder
+                )
+                if alt_mask_path and alt_voxel_count > 0:
+                    actual_mask_path = alt_mask_path
+                    final_voxel_count = alt_voxel_count
+                    mask_saved_successfully = True
+                    recovery_stats['alternative_format_saved'] += 1
+
+            if not mask_saved_successfully or final_voxel_count == 0:
+                failed_combinations[combo_key] = {'reason': 'Mask saving failed'}
+                recovery_stats['failed'] += 1
+                continue
+
+            if not series_description or series_description == 'Unknown_Series':
+                try:
+                    dcm = pydicom.dcmread(dicom_names[0], stop_before_pixels=True)
+                    series_description = getattr(dcm, 'SeriesDescription', series_description)
+                except Exception:
+                    pass
+
+            dataset_records.append({
+                'patient_id': patient_id,
+                'image_path': output_image_path,
+                'mask_path': actual_mask_path,
+                'roi_name': used_roi_name or roi_name,
+                'original_roi_target': roi_name,
+                'series_description': series_description,
+                'series_uid': series_uid,
+                'timepoint': timepoint,
+                'study_date': study_date,
+                'slice_count': slice_count,
+                'modality': modality,
+                'recovery_method': recovery_method,
+                'needs_review': (recovery_method != 'robust_rt_utils'),
+                'voxel_count': int(final_voxel_count)
+            })
+
+        except Exception as e:
+            failed_combinations[combo_key] = {'reason': 'Critical processing error', 'details': str(e)}
+            recovery_stats['failed'] += 1
+            continue
+
+    if progress_bar:
+        progress_bar.progress(1.0)
+    if progress_text:
+        progress_text.text(f"Advanced preprocessing complete: {len(dataset_records)}/{total} combinations succeeded")
+
+    summary = {
+        'total_combinations': total,
+        'successful_combinations': len(dataset_records),
+        'total_patients': len(patients_seen),
+        'successful_patients': len({r['patient_id'] for r in dataset_records}),
+        'failed_patients': failed_combinations,
+        'recovery_statistics': recovery_stats,
+        'processing_mode': 'advanced_search'
+    }
+    return pd.DataFrame(dataset_records), summary
+
+
 # =============================================================================
 # END OF FILE
 # =============================================================================

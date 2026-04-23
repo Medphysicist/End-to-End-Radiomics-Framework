@@ -1036,8 +1036,10 @@ def run_extraction(dataset_df: pd.DataFrame, params: Dict, n_jobs: int = 1) -> p
         series_counts = dataset_df['series_description'].value_counts()
         st.write(f"  - Series: {dict(series_counts)}")
     
-    # ✅ CRITICAL: Process EVERY row in the dataset
-    for idx, row in dataset_df.iterrows():
+    # ✅ CRITICAL: Process EVERY row in the dataset.
+    # Use positional (0..N-1) indices so metadata alignment in step 6 stays
+    # correct even if the caller passed a DataFrame with a non-trivial index.
+    for idx, (_orig_idx, row) in enumerate(dataset_df.iterrows()):
         try:
             # Update progress
             current_progress = (idx + 1) / total_rows
@@ -1101,10 +1103,15 @@ def run_extraction(dataset_df: pd.DataFrame, params: Dict, n_jobs: int = 1) -> p
             
             # ✅ EXTRACT FEATURES
             feature_vector = extractor.execute(image, mask)
-            
-            # Convert to dictionary, excluding diagnostics
-            feature_dict = {'patient_id': patient_id}
-            
+
+            # Convert to dictionary, excluding diagnostics. _source_row_idx
+            # lets step 6 align the per-row metadata positionally even when
+            # some rows fail extraction.
+            feature_dict = {
+                '_source_row_idx': int(idx),
+                'patient_id': patient_id,
+            }
+
             for key, value in feature_vector.items():
                 if 'diagnostics_' not in key:
                     try:
@@ -1112,7 +1119,7 @@ def run_extraction(dataset_df: pd.DataFrame, params: Dict, n_jobs: int = 1) -> p
                     except (ValueError, TypeError):
                         # Skip non-numeric features
                         pass
-            
+
             all_features.append(feature_dict)
             
             # Success indicator (only show every 10th to avoid spam)
@@ -1143,58 +1150,78 @@ def run_extraction(dataset_df: pd.DataFrame, params: Dict, n_jobs: int = 1) -> p
         return pd.DataFrame()
     
     features_df = pd.DataFrame(all_features)
-    
+
     st.success(f"✅ Successfully extracted features from {len(features_df)} rows")
-    
+
     # ========================================================================
-    # STEP 6: MERGE METADATA BACK INTO FEATURES DATAFRAME
+    # STEP 6: ATTACH METADATA BY POSITIONAL ROW INDEX (NOT by patient_id)
     # ========================================================================
-    
+    #
+    # Bugfix: a previous implementation merged the metadata onto features_df
+    # using on='patient_id'. With multi-ROI / multi-series data every row
+    # shares the same patient_id, so the merge produced an N×N Cartesian
+    # product and replicated the features of one (series, ROI) across every
+    # row. We now align by the ORIGINAL row index instead, which is the only
+    # key that actually identifies a (patient, series, ROI) combination.
+    # ========================================================================
+
     if not features_df.empty:
-        
-        st.write("🔗 Merging metadata back into features...")
-        
-        # Strategy: Merge metadata by row index alignment
-        # Since we processed dataset_df row by row, and all_features has the same order
-        # (excluding failed rows), we need to be careful
-        
-        # Better approach: merge on patient_id but preserve all metadata
-        for col_name, col_data in metadata_dict.items():
+
+        st.write("🔗 Attaching metadata back to features (positional alignment)...")
+
+        # Every entry in all_features carries its originating row index so we
+        # can line metadata up 1:1 regardless of how many rows failed.
+        if '_source_row_idx' in features_df.columns:
+            source_idx = features_df['_source_row_idx'].astype(int).tolist()
+        else:
+            source_idx = list(range(len(features_df)))
+
+        ds_reset = dataset_df.reset_index(drop=True)
+
+        for col_name in metadata_preserve_cols:
             if col_name == 'patient_id':
-                continue  # Already in features_df
-            
-            # Create temporary dataframe with metadata
-            temp_metadata_df = pd.DataFrame({
-                'patient_id': metadata_dict.get('patient_id', []),
-                col_name: col_data
-            })
-            
-            # Handle duplicates: keep all rows (multi-series/multi-ROI case)
-            # Use merge with suffixes to handle column conflicts
-            if col_name not in features_df.columns:
-                # First time adding this column
-                features_df = features_df.merge(
-                    temp_metadata_df,
-                    on='patient_id',
-                    how='left'
-                )
-            else:
-                # Column already exists, skip or update
-                st.write(f"  ⚠️ Column '{col_name}' already exists, skipping merge")
-        
-        # ✅ CRITICAL: REORDER COLUMNS - METADATA FIRST, THEN FEATURES
+                continue
+            if col_name not in ds_reset.columns:
+                continue
+
+            try:
+                aligned_values = [ds_reset.at[i, col_name] for i in source_idx]
+            except Exception:
+                continue
+
+            # Do not clobber a real column that already came out of
+            # PyRadiomics with the same name.
+            if col_name in features_df.columns:
+                st.write(f"  ⚠️ Column '{col_name}' already present in features; keeping feature value, not metadata.")
+                continue
+
+            features_df[col_name] = aligned_values
+
+        # Also attach the placeholder metadata we created (roi_name /
+        # series_description) when dataset_df didn't have them, so later
+        # steps can always rely on these columns existing.
+        for col_name in ('roi_name', 'series_description'):
+            if col_name in features_df.columns:
+                continue
+            if col_name in metadata_dict:
+                values = metadata_dict[col_name]
+                try:
+                    features_df[col_name] = [values[i] for i in source_idx]
+                except Exception:
+                    features_df[col_name] = values[: len(features_df)]
+
+        if '_source_row_idx' in features_df.columns:
+            features_df = features_df.drop(columns=['_source_row_idx'])
+
+        # ✅ REORDER COLUMNS - METADATA FIRST, THEN FEATURES
         metadata_cols_present = [c for c in metadata_preserve_cols if c in features_df.columns]
         feature_cols = [c for c in features_df.columns if c not in metadata_cols_present]
-        
-        # Final column order: metadata columns first, feature columns last
+
         features_df = features_df[metadata_cols_present + feature_cols]
-        
-        st.success(f"✅ Metadata merged. Column order: {', '.join(metadata_cols_present)} + {len(feature_cols)} feature columns")
-        
-        # Show what metadata was preserved
+
+        st.success(f"✅ Metadata aligned. Column order: {', '.join(metadata_cols_present)} + {len(feature_cols)} feature columns")
         st.info(f"📋 **Preserved metadata columns:** {', '.join(metadata_cols_present)}")
-        
-        # ✅ VERIFICATION: Check row count
+
         if len(features_df) != len(dataset_df):
             st.warning(
                 f"⚠️ Row count mismatch: Input had {len(dataset_df)} rows, "
