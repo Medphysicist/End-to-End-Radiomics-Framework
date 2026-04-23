@@ -1902,10 +1902,15 @@ def build_extraction_execution_section():
                 return
 
             st.info(f"🔄 Starting extraction on {len(df_to_extract)} dataset rows...")
-            
-            # Call extraction - works with (Series × ROI) expanded dataset
+
+            # Call extraction. Pass the FULL dataset (not just the 3 required
+            # columns) so run_extraction() can keep roi_name, series_*, modality,
+            # voxel_count, etc. aligned 1:1 with each feature row.
+            # The previous code stripped these columns and then re-merged on
+            # patient_id alone, which produced an N×N Cartesian product and
+            # replicated one (series, ROI)'s features across every ROI.
             features_df = run_extraction(
-                dataset_df=df_to_extract[['patient_id', 'image_path', 'mask_path']],
+                dataset_df=df_to_extract.reset_index(drop=True),
                 params=st.session_state.get('pyradiomics_params'),
                 n_jobs=n_jobs
             )
@@ -1913,14 +1918,6 @@ def build_extraction_execution_section():
             if features_df is None or features_df.empty:
                 st.error("❌ Feature extraction failed.")
                 return
-
-            # Merge back ROI/series metadata
-            try:
-                meta_cols = [c for c in df_to_extract.columns if c not in ['image_path', 'mask_path']]
-                if meta_cols:
-                    features_df = features_df.merge(df_to_extract[meta_cols], on='patient_id', how='left')
-            except Exception:
-                pass
 
             # Save results
             out_dir = st.session_state.get('output_directory', 'output')
